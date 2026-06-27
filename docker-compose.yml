@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: symex
       POSTGRES_DB: symex
     ports:
-      - "5432:5432"
+      - "5434:5432"
     volumes:
       - symex_pgdata:/var/lib/postgresql/data
     healthcheck:

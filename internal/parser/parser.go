@@ -1,8 +1,12 @@
 // Package parser implements stage-1 of the incremental call graph engine:
 // AST parsing, symbol extraction, and call-reference classification.
 //
-// It uses go/parser, go/ast, and go/types from the standard library.
-// No external parsing dependency is introduced.
+// It uses golang.org/x/tools/go/packages for module-aware loading so that
+// types.Info.Selections is fully populated across local module boundaries
+// (e.g. github.com/example/fixture/billing → github.com/example/fixture/payment).
+// The importer.Default() approach only resolves stdlib and compiled packages;
+// it cannot resolve local module imports, leaving Selections incomplete and
+// causing all cross-package method calls to be missed as interface_resolved.
 //
 // Call resolution strategy (critical for downstream correctness):
 //
@@ -22,40 +26,62 @@ package parser
 import (
 	"fmt"
 	"go/ast"
-	"go/importer"
-	"go/parser"
 	"go/token"
 	"go/types"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"golang.org/x/tools/go/packages"
+
 	"github.com/yourorg/symex/internal/canonicalize"
 	"github.com/yourorg/symex/internal/symboltable"
 )
 
-// ParseRepo walks every .go file under repoRoot, type-checks each package,
+// ParseRepo loads every package under repoRoot using go/packages (module-aware),
+// type-checks them all together so cross-package Selections are populated,
 // and returns the aggregated RepoSymbolTable.
 //
 // repoRoot must be the directory containing go.mod.
-// modulePath must match the module directive in go.mod (e.g. "github.com/foo/bar").
+// modulePath must match the module directive in go.mod.
 func ParseRepo(repoRoot, modulePath string) (*symboltable.RepoSymbolTable, error) {
-	// Discover all packages under the repo root.
-	pkgDirs, err := findPackageDirs(repoRoot)
+	cfg := &packages.Config{
+		Mode: packages.NeedName |
+			packages.NeedFiles |
+			packages.NeedCompiledGoFiles |
+			packages.NeedImports |
+			packages.NeedTypes |
+			packages.NeedSyntax |
+			packages.NeedTypesInfo |
+			packages.NeedTypesSizes,
+		Dir:  repoRoot,
+		Fset: token.NewFileSet(),
+		// ParseFile with ParseComments so the canonicalizer can strip them.
+		ParseFile: func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+			return parseFileWithComments(fset, filename, src)
+		},
+	}
+
+	// "./..." loads all packages in the module rooted at cfg.Dir.
+	pkgs, err := packages.Load(cfg, "./...")
 	if err != nil {
-		return nil, fmt.Errorf("discover packages: %w", err)
+		return nil, fmt.Errorf("packages.Load: %w", err)
 	}
 
 	result := &symboltable.RepoSymbolTable{
 		ModulePath: modulePath,
 	}
 
-	for _, dir := range pkgDirs {
-		files, err := parseAndCheckPackage(dir, repoRoot, modulePath)
+	for _, pkg := range pkgs {
+		// Log load errors per-package but continue — partial type info is
+		// still useful for packages that do load cleanly.
+		for _, e := range pkg.Errors {
+			fmt.Fprintf(os.Stderr, "warn: %s: %v\n", pkg.PkgPath, e)
+		}
+
+		files, err := extractPackageSymbols(pkg, repoRoot, cfg.Fset)
 		if err != nil {
-			// Non-fatal: log and continue so one broken package doesn't abort
-			// analysis of the whole repo.
-			fmt.Fprintf(os.Stderr, "warn: skipping %s: %v\n", dir, err)
+			fmt.Fprintf(os.Stderr, "warn: extracting %s: %v\n", pkg.PkgPath, err)
 			continue
 		}
 		result.Files = append(result.Files, files...)
@@ -64,117 +90,76 @@ func ParseRepo(repoRoot, modulePath string) (*symboltable.RepoSymbolTable, error
 	return result, nil
 }
 
-// findPackageDirs returns all directories under root that contain at least one
-// non-test .go file.
-func findPackageDirs(root string) ([]string, error) {
-	seen := make(map[string]bool)
-	var dirs []string
-
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		// Skip hidden directories and the vendor directory.
-		if info.IsDir() {
-			base := info.Name()
-			if base == "vendor" || (base != "." && strings.HasPrefix(base, ".")) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(path, ".go") {
-			return nil
-		}
-		dir := filepath.Dir(path)
-		if !seen[dir] {
-			seen[dir] = true
-			dirs = append(dirs, dir)
-		}
-		return nil
-	})
-	return dirs, err
+// parseFileWithComments is the ParseFile hook passed to packages.Config.
+// It parses with ParseComments so comment nodes survive into the AST,
+// allowing the canonicalizer to strip them during hashing.
+//
+// Note: our package is named "parser" which shadows go/parser, so we
+// delegate to parseGoFile (in parse_file.go) which imports go/parser
+// under an alias.
+func parseFileWithComments(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+	return parseGoFile(fset, filename, src)
 }
 
-// parseAndCheckPackage parses all .go files in dir, runs go/types type-checking
-// on the package, and returns one FileSymbolTable per file.
-func parseAndCheckPackage(
-	dir, repoRoot, modulePath string,
+// extractPackageSymbols converts one loaded *packages.Package into
+// FileSymbolTable entries, one per source file.
+func extractPackageSymbols(
+	pkg *packages.Package,
+	repoRoot string,
+	fset *token.FileSet,
 ) ([]symboltable.FileSymbolTable, error) {
-	fset := token.NewFileSet()
-
-	// Parse all files in the directory. We include comments so we can strip
-	// them later in the canonicalizer; parsing mode includes imports so the
-	// type checker can resolve cross-package references.
-	pkgs, err := parser.ParseDir(fset, dir, nil, parser.ParseComments)
-	if err != nil {
-		return nil, fmt.Errorf("parse %s: %w", dir, err)
+	if pkg.TypesInfo == nil {
+		// Package failed to type-check entirely; skip.
+		return nil, nil
 	}
+
+	info := pkg.TypesInfo
+	importPath := pkg.PkgPath
+
+	// Build the per-package interface map for implementor detection.
+	// We need to do this across all files in the package.
+	pkgInterfaces := collectPackageInterfacesFromPkg(pkg, info)
 
 	var result []symboltable.FileSymbolTable
 
-	for pkgName, pkg := range pkgs {
-		// Collect the *ast.File slice in a stable order.
-		var astFiles []*ast.File
-		var filePaths []string
-		for fpath, f := range pkg.Files {
-			astFiles = append(astFiles, f)
-			filePaths = append(filePaths, fpath)
+	for _, f := range pkg.Syntax {
+		pos := fset.Position(f.Pos())
+		absPath := pos.Filename
+		if absPath == "" {
+			continue
 		}
 
-		// Type-check the package so we can resolve call targets.
-		info := &types.Info{
-			Types:      make(map[ast.Expr]types.TypeAndValue),
-			Defs:       make(map[*ast.Ident]types.Object),
-			Uses:       make(map[*ast.Ident]types.Object),
-			Selections: make(map[*ast.SelectorExpr]*types.Selection),
+		relPath, err := filepath.Rel(repoRoot, absPath)
+		if err != nil || strings.HasPrefix(relPath, "..") {
+			// File is outside repoRoot (e.g. a dependency in the module cache).
+			continue
+		}
+		relPath = filepath.ToSlash(relPath)
+
+		pkgName := pkg.Name
+
+		fst := symboltable.FileSymbolTable{
+			FilePath:   relPath,
+			Package:    pkgName,
+			ImportPath: importPath,
 		}
 
-		// Compute the import path for this directory.
-		relDir, _ := filepath.Rel(repoRoot, dir)
-		importPath := modulePath
-		if relDir != "." && relDir != "" {
-			importPath = modulePath + "/" + filepath.ToSlash(relDir)
-		}
+		fst.Defined = extractDefinedSymbols(f, fset, info, pkgName, importPath, pkgInterfaces)
+		fst.References = extractCallReferences(f, fset, info, pkgName, importPath)
 
-		conf := types.Config{
-			Importer: importer.Default(),
-			// Don't abort on errors in imported packages — we may be
-			// analyzing a repo with missing dependencies.
-			Error: func(err error) {
-				// Swallow type errors from imports we can't resolve;
-				// they still give us partial type info for the current pkg.
-			},
-		}
-
-		_, _ = conf.Check(importPath, fset, astFiles, info)
-		// We proceed even if Check returns an error — partial info is still
-		// useful for the symbols we can resolve.
-
-		// Collect all interface types defined in this package so we can
-		// compute interface satisfaction for concrete types.
-		pkgInterfaces := collectPackageInterfaces(astFiles, info)
-
-		for i, f := range astFiles {
-			fpath := filePaths[i]
-			relPath, _ := filepath.Rel(repoRoot, fpath)
-
-			fst := symboltable.FileSymbolTable{
-				FilePath:   relPath,
-				Package:    pkgName,
-				ImportPath: importPath,
-			}
-
-			// Extract defined symbols from this file.
-			fst.Defined = extractDefinedSymbols(f, fset, info, pkgName, importPath, pkgInterfaces)
-
-			// Extract call references from this file's function bodies.
-			fst.References = extractCallReferences(f, fset, info, pkgName, importPath)
-
-			result = append(result, fst)
-		}
+		result = append(result, fst)
 	}
 
 	return result, nil
+}
+
+// collectPackageInterfacesFromPkg builds the interface name → *types.Interface
+// map from a fully type-checked *packages.Package.
+func collectPackageInterfacesFromPkg(
+	pkg *packages.Package,
+	info *types.Info,
+) map[string]*types.Interface {
+	return collectPackageInterfaces(pkg.Syntax, info)
 }
 
 // collectPackageInterfaces builds a map from interface type name to the
@@ -388,8 +373,22 @@ func extractCallReferences(
 // with the correct CallKind, using go/types to distinguish direct from
 // interface-dispatched calls.
 //
+// go/types.Info.Selections contains three kinds of selector expressions:
+//
+//   - types.MethodVal  — x.Method() where x has a concrete or interface type.
+//     Obj() is *types.Func.
+//   - types.MethodExpr — T.Method or (*T).Method used as a value.
+//     Obj() is *types.Func.
+//   - types.FieldVal   — x.field where field is a struct field.
+//     Obj() is *types.Var. If the field has a func type and is then called
+//     as x.field(...), this appears as a CallExpr with a SelectorExpr whose
+//     Selection is FieldVal. This is NOT a static method dispatch.
+//
+// The original code assumed Selections always yields *types.Func, causing a
+// panic on FieldVal selections. We now check sel.Kind() explicitly.
+//
 // Returns (ref, false) when the call cannot be classified meaningfully
-// (e.g. a built-in function like make/len/append).
+// (e.g. a built-in, a func-typed variable call, or an anonymous literal).
 func classifyCall(
 	call *ast.CallExpr,
 	fset *token.FileSet,
@@ -401,15 +400,13 @@ func classifyCall(
 	switch fn := call.Fun.(type) {
 	case *ast.Ident:
 		// Simple function call: foo(...)
-		//
-		// Look up the identifier in the Uses map to get the resolved object.
 		obj, ok := info.Uses[fn]
 		if !ok {
-			// Could be a built-in (make, new, len, cap, etc.) or unresolved.
 			return symboltable.CallReference{}, false
 		}
 		switch o := obj.(type) {
 		case *types.Builtin:
+			// make, len, cap, new, etc. — not a user-defined call.
 			return symboltable.CallReference{}, false
 		case *types.Func:
 			return symboltable.CallReference{
@@ -418,69 +415,94 @@ func classifyCall(
 				Kind:   symboltable.CallDirect,
 				Line:   line,
 			}, true
+		case *types.TypeName:
+			// Type conversion: T(x) — not a function call.
+			return symboltable.CallReference{}, false
 		default:
-			// Variable holding a func, or type conversion — not a static call.
+			// *types.Var: a func-typed variable called as f().
+			// We cannot statically resolve which function this is.
+			// Record it as a direct call with the variable name as a best-effort
+			// callee (no concrete target, but we don't drop it entirely so the
+			// caller's outgoing edges aren't silently empty).
+			_ = o
 			return symboltable.CallReference{
 				Caller: callerQName,
 				Callee: fn.Name,
-				Kind:   symboltable.CallDirect, // best approximation
-				Line:   line,
-			}, true
-		}
-
-	case *ast.SelectorExpr:
-		// Method call or package-qualified call: x.Method(...) or pkg.Func(...)
-		//
-		// The key distinction:
-		//   - If info.Selections has an entry for this selector, it is a method
-		//     call (either on a concrete type or on an interface).
-		//   - If not, it is a package-qualified function call (pkg.Func).
-
-		if sel, ok := info.Selections[fn]; ok {
-			// This is a method call: x.Method(...)
-			// Determine whether the receiver's type is an interface.
-			recvType := sel.Recv()
-			// Unwrap pointer.
-			if ptr, ok := recvType.(*types.Pointer); ok {
-				recvType = ptr.Elem()
-			}
-
-			if _, isIface := recvType.Underlying().(*types.Interface); isIface {
-				// Interface dispatch: we know the method name but not which
-				// concrete implementation will be called.
-				ifaceName := recvType.String()
-				methodName := fn.Sel.Name
-				return symboltable.CallReference{
-					Caller: callerQName,
-					Callee: ifaceName + "." + methodName,
-					Kind:   symboltable.CallInterfaceResolved,
-					Line:   line,
-				}, true
-			}
-
-			// Concrete receiver — direct call.
-			return symboltable.CallReference{
-				Caller: callerQName,
-				Callee: qualifyFunc(sel.Obj().(*types.Func)),
 				Kind:   symboltable.CallDirect,
 				Line:   line,
 			}, true
 		}
 
-		// Not in Selections — must be a package-qualified call: pkg.Func(...)
-		// Look it up in Uses.
-		if obj, ok := info.Uses[fn.Sel]; ok {
-			if f, ok := obj.(*types.Func); ok {
+	case *ast.SelectorExpr:
+		// x.Method(...) or pkg.Func(...)
+		//
+		// Check info.Selections first. A hit means this is a field or method
+		// access on a value (not a package-qualified name).
+		if sel, ok := info.Selections[fn]; ok {
+			switch sel.Kind() {
+			case types.MethodVal, types.MethodExpr:
+				// Static method dispatch. Obj() is guaranteed *types.Func here.
+				fn_obj := sel.Obj().(*types.Func) // safe: MethodVal/MethodExpr always have *types.Func
+
+				// Determine whether the receiver's static type is an interface.
+				recvType := sel.Recv()
+				if ptr, ok := recvType.(*types.Pointer); ok {
+					recvType = ptr.Elem()
+				}
+
+				if _, isIface := recvType.Underlying().(*types.Interface); isIface {
+					// Interface dispatch — over-approximate to all implementations.
+					return symboltable.CallReference{
+						Caller: callerQName,
+						Callee: recvType.String() + "." + fn.Sel.Name,
+						Kind:   symboltable.CallInterfaceResolved,
+						Line:   line,
+					}, true
+				}
+
+				// Concrete receiver — precise direct call.
 				return symboltable.CallReference{
 					Caller: callerQName,
-					Callee: qualifyFunc(f),
+					Callee: qualifyFunc(fn_obj),
 					Kind:   symboltable.CallDirect,
 					Line:   line,
 				}, true
+
+			case types.FieldVal:
+				// x.field(...) where field is a func-typed struct field.
+				// This is a dynamic dispatch through a stored function value,
+				// not a static method call. We cannot resolve the target
+				// statically, so we skip it rather than record a wrong edge.
+				// Concretely: chi uses patterns like mux.handler(w, r) where
+				// handler is a field of type http.HandlerFunc.
+				return symboltable.CallReference{}, false
 			}
 		}
 
-		// Fallback: record what we have.
+		// Not in Selections → package-qualified call: pkg.Func(...)
+		// Uses[fn.Sel] resolves the identifier to the package-level object.
+		if obj, ok := info.Uses[fn.Sel]; ok {
+			switch o := obj.(type) {
+			case *types.Func:
+				return symboltable.CallReference{
+					Caller: callerQName,
+					Callee: qualifyFunc(o),
+					Kind:   symboltable.CallDirect,
+					Line:   line,
+				}, true
+			case *types.TypeName:
+				// pkg.Type(x) — type conversion, not a call.
+				return symboltable.CallReference{}, false
+			case *types.Builtin:
+				return symboltable.CallReference{}, false
+			default:
+				// Func-typed variable accessed via package path — rare, skip.
+				_ = o
+				return symboltable.CallReference{}, false
+			}
+		}
+
+		// Completely unresolved selector — record best-effort.
 		return symboltable.CallReference{
 			Caller: callerQName,
 			Callee: fn.Sel.Name,
@@ -489,10 +511,12 @@ func classifyCall(
 		}, true
 
 	case *ast.FuncLit:
-		// Anonymous function literal — not a static call we can name.
+		// Anonymous function literal invoked immediately: func(){...}()
+		// No static callee to record.
 		return symboltable.CallReference{}, false
 
 	default:
+		// IndexExpr (generic instantiation calls), ParenExpr, etc.
 		return symboltable.CallReference{}, false
 	}
 }
@@ -514,8 +538,7 @@ func qualifyFunc(f *types.Func) string {
 		recv = ptr.Elem()
 	}
 	recvName := types.TypeString(recv, nil)
-	// recvName may be "pkg.TypeName" — strip the package prefix for the
-	// format we want: "pkg/path.(TypeName).Method"
+	// recvName may be "pkg.TypeName" — strip the package prefix.
 	if idx := strings.LastIndex(recvName, "."); idx >= 0 {
 		recvName = recvName[idx+1:]
 	}

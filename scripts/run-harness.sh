@@ -10,7 +10,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO="${1:-/tmp/symex-harness-chi}"
 COMMITS="${2:-25}"
-DSN="${SYMEX_DSN:-postgres://symex:symex@localhost:5432/symex?sslmode=disable}"
+DSN="${SYMEX_DSN:-postgres://symex:symex@localhost:5434/symex?sslmode=disable}"
 
 # Clone if not present
 if [ ! -d "$REPO/.git" ]; then
@@ -19,10 +19,10 @@ if [ ! -d "$REPO/.git" ]; then
 fi
 
 # Start Postgres if needed
-if ! pg_isready -h localhost -p 5432 -U symex -d symex -q 2>/dev/null; then
+if ! pg_isready -h localhost -p 5434 -U symex -d symex -q 2>/dev/null; then
   echo "[harness] Starting Postgres..."
   docker-compose -f "$ROOT/docker-compose.yml" up -d
-  for i in $(seq 1 30); do pg_isready -h localhost -p 5432 -U symex -d symex -q && break; sleep 1; done
+  for i in $(seq 1 30); do pg_isready -h localhost -p 5434 -U symex -d symex -q && break; sleep 1; done
 fi
 
 # Build

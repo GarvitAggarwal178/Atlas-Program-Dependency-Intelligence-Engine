@@ -37,7 +37,8 @@ func main() {
 	}
 
 	ctx := context.Background()
-
+	fmt.Println("DSN received:")
+	fmt.Println(*dsn)
 	db, err := store.Open(*dsn)
 	if err != nil {
 		fatalf("open postgres: %v", err)

@@ -8,10 +8,11 @@
 //	symex-graph build -repo <path> -dsn <postgres-dsn> [-commit <sha>]
 //
 // ## analyze: given a diff (two commits), classify changed symbols and
-//             compute the reachable set using the filtered frontier.
 //
-//	symex-graph analyze -repo <path> -dsn <postgres-dsn> \
-//	    -base <base-commit> -head <head-commit>
+//	            compute the reachable set using the filtered frontier.
+//
+//		symex-graph analyze -repo <path> -dsn <postgres-dsn> \
+//		    -base <base-commit> -head <head-commit>
 //
 // ## build-and-analyze: do both in one shot (most common for development).
 //
@@ -20,7 +21,7 @@
 //
 // # Postgres DSN format
 //
-//	"host=localhost port=5432 user=symex password=symex dbname=symex sslmode=disable"
+//	"host=localhost port=5434 user=symex password=symex dbname=symex sslmode=disable"
 //	or the URL form: "postgres://symex:symex@localhost/symex?sslmode=disable"
 package main
 
@@ -207,14 +208,14 @@ type AnalysisOutput struct {
 	// ReachableSet is the BFS result, starting only from non-trivial symbols.
 	ReachableSet []ReachableSymbolEntry `json:"reachable_set"`
 	Summary      struct {
-		ChangedTotal           int `json:"changed_total"`
-		TrivialCount           int `json:"trivial_count"`
-		SignatureChangeCount   int `json:"signature_change_count"`
-		LogicChangeCount       int `json:"logic_change_count"`
-		FrontierSize           int `json:"frontier_size"`
-		TotalReachable         int `json:"total_reachable"`
-		DirectPathCount        int `json:"direct_path_count"`
-		InterfacePathCount     int `json:"interface_resolved_path_count"`
+		ChangedTotal         int `json:"changed_total"`
+		TrivialCount         int `json:"trivial_count"`
+		SignatureChangeCount int `json:"signature_change_count"`
+		LogicChangeCount     int `json:"logic_change_count"`
+		FrontierSize         int `json:"frontier_size"`
+		TotalReachable       int `json:"total_reachable"`
+		DirectPathCount      int `json:"direct_path_count"`
+		InterfacePathCount   int `json:"interface_resolved_path_count"`
 	} `json:"summary"`
 }
 

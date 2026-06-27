@@ -64,6 +64,8 @@ type DB struct {
 // Open opens a connection to Postgres using the provided DSN and verifies
 // connectivity with a ping.
 func Open(dsn string) (*DB, error) {
+	fmt.Println("Opening postgres with:")
+	fmt.Println(dsn)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sql.Open: %w", err)
@@ -109,11 +111,11 @@ type SymbolRow struct {
 
 // DispatchSite is a single row in interface_dispatch_sites.
 type DispatchSite struct {
-	Repo             string
-	CommitHash       string
-	InterfaceName    string
-	CallSiteSymbol   string
-	CallSiteFile     string
+	Repo           string
+	CommitHash     string
+	InterfaceName  string
+	CallSiteSymbol string
+	CallSiteFile   string
 }
 
 // InsertEdges bulk-inserts call edges inside a single transaction.

@@ -42,10 +42,11 @@ CREATE TABLE IF NOT EXISTS symbols (
 
 CREATE TABLE IF NOT EXISTS interface_dispatch_sites (
     repo              TEXT NOT NULL,
+    commit_hash       TEXT NOT NULL,
     interface_name    TEXT NOT NULL,
     call_site_symbol  TEXT NOT NULL,
     call_site_file    TEXT NOT NULL,
-    PRIMARY KEY (repo, interface_name, call_site_symbol)
+    PRIMARY KEY (repo, commit_hash, interface_name, call_site_symbol)
 );
 
 CREATE INDEX IF NOT EXISTS idx_call_edges_target
@@ -109,6 +110,7 @@ type SymbolRow struct {
 // DispatchSite is a single row in interface_dispatch_sites.
 type DispatchSite struct {
 	Repo             string
+	CommitHash       string
 	InterfaceName    string
 	CallSiteSymbol   string
 	CallSiteFile     string
@@ -194,8 +196,8 @@ func (s *DB) InsertDispatchSites(ctx context.Context, sites []DispatchSite) erro
 
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO interface_dispatch_sites
-		    (repo, interface_name, call_site_symbol, call_site_file)
-		VALUES ($1, $2, $3, $4)
+		    (repo, commit_hash, interface_name, call_site_symbol, call_site_file)
+		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT DO NOTHING
 	`)
 	if err != nil {
@@ -205,7 +207,7 @@ func (s *DB) InsertDispatchSites(ctx context.Context, sites []DispatchSite) erro
 
 	for _, ds := range sites {
 		if _, err := stmt.ExecContext(ctx,
-			ds.Repo, ds.InterfaceName, ds.CallSiteSymbol, ds.CallSiteFile,
+			ds.Repo, ds.CommitHash, ds.InterfaceName, ds.CallSiteSymbol, ds.CallSiteFile,
 		); err != nil {
 			return fmt.Errorf("insert dispatch site: %w", err)
 		}
@@ -292,7 +294,7 @@ func (s *DB) DeleteGraphForCommit(ctx context.Context, repo, commitHash string) 
 		return err
 	}
 	defer tx.Rollback()
-	for _, tbl := range []string{"call_edges", "symbols", "interface_dispatch_sites"} {
+	for _, tbl := range []string{"call_edges", "symbols", "interface_dispatch_sites", "type_ifaces"} {
 		if _, err := tx.ExecContext(ctx,
 			fmt.Sprintf("DELETE FROM %s WHERE repo=$1 AND commit_hash=$2", tbl),
 			repo, commitHash,

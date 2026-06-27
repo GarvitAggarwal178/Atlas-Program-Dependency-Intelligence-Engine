@@ -426,3 +426,192 @@ Full DDL: `internal/store/store.go` → `Schema` constant.
 4. **`must_run` never includes an `interface_resolved`-only path**: enforced by
    the weakest-link rule — any `interface_resolved` edge on any path degrades
    the whole path, so the symbol ends up counted in `InterfaceResolvedCount`.
+
+---
+
+## Stage 3: Semantic Change Classifier
+
+### New package: `internal/classifier/`
+
+Classifies each symbol in the changed set as `trivial`, `signature_change`, or `logic_change`. Trivial symbols are excluded from the reachability frontier — zero blast radius.
+
+### Classification algorithm
+
+```
+ClassifySymbol(fetcher, baseCommit, headCommit, filePath, symbolName):
+  1. Fetch file source at baseCommit and headCommit via git show <sha>:<path>
+  2. Parse both versions; locate the FuncDecl by (funcName, receiverType)
+  3. Compute canonical hash of each body (comments stripped, locals alpha-renamed)
+  4. Extract signature string of each: types-only, no parameter names
+     e.g. "(int, string) error" — not "(amount int, label string) error"
+  5. Classify:
+     - beforeSig != afterSig  → signature_change (callers affected regardless of body)
+     - beforeHash == afterHash → trivial (no structural change)
+     - else                   → logic_change
+```
+
+### Why canonicalization prevents false positives
+
+Without alpha-renaming, `total := x+y` and `sum := x+y` produce different printed ASTs and would incorrectly classify as `logic_change`. After renaming both locals to `_v0`, the bodies are structurally identical and hash to the same value.
+
+**The critical test case — logic change disguised as rename:**
+
+```go
+// Before: total := x + y; return total
+// After:  sum   := x * y; return sum  ← rename AND operator change
+```
+
+After canonicalization:
+- Before: `_v2 := _v0 + _v1; return _v2`
+- After:  `_v2 := _v0 * _v1; return _v2`
+
+The operator difference survives → `logic_change`. A naive implementation that stops at "both have the same local count" would misclassify this as trivial.
+
+### Test cases (all pass)
+
+| Test | Input | Expected | Why |
+|------|-------|----------|-----|
+| `TestPureRenameIsTrivial` | `total` → `sum`, same operator | trivial | alpha-rename makes identical |
+| `TestPureCommentEditIsTrivial` | doc comment added | trivial | comments stripped before hash |
+| `TestParameterTypeChangeIsSignatureChange` | `int` → `int64` | signature_change | signature string differs |
+| `TestLogicChangeDisguisedAsRename` | rename + `+` → `*` | logic_change | operator survives canonicalization |
+| + 11 table-driven cases | various | per-case | covering whitespace, return type, callee change, etc. |
+
+### Wiring into the pipeline
+
+```
+diff → changed symbol set (raw)
+           ↓
+     ClassifyAll()
+           ↓
+  classifications map + filtered frontier
+  (trivial excluded from frontier)
+           ↓
+     BFS reachability
+  (starts from filtered frontier only)
+```
+
+---
+
+## Stage 4: Incremental Update Engine
+
+### The correctness problem (why naive is wrong)
+
+```
+File A:  proc.ledger.Debit()   ← interface_resolved call through Ledger
+File B:  type SQLLedger struct  ← implements Ledger
+```
+
+Naive incremental: B changes → retract B's edges, reparse B, reinsert.
+Result: A's interface_resolved edges still point to the old implementors.
+If a new type `CacheLedger` in B now implements Ledger, A's edges are WRONG.
+A never changed, so a naive implementation never touches A.
+
+### The 4-step rule
+
+When file F changes from commit A to commit B:
+
+**Step 1 — Retract F's data:**
+```sql
+DELETE FROM call_edges WHERE source_file = F AND commit_hash = B
+DELETE FROM symbols WHERE file_path = F AND commit_hash = B
+DELETE FROM interface_dispatch_sites WHERE call_site_file = F AND commit_hash = B
+DELETE FROM type_ifaces WHERE source_file = F AND commit_hash = B
+```
+
+**Step 2 — Find affected interfaces (the hard part):**
+Load `type_ifaces` for F at the BASE commit (before retraction). Compare with F's NEW types from the re-parsed symbol table. Any interface whose implementer set changed → find every call site dispatching through it in `interface_dispatch_sites` (ANY file). Retract those call sites' `interface_resolved` edges.
+
+**Step 3 — Reinsert F's new data:**
+Parse F at headCommit. Insert new edges, symbols, dispatch_sites (with `method_name`), type_ifaces.
+
+**Step 4 — Recompute cross-file edges:**
+For each call site from step 2, re-expand using the updated implementer index. Insert the corrected `interface_resolved` edges.
+
+### Schema additions
+
+```sql
+-- Persists which interfaces each type implements, per commit.
+-- Needed to detect implementer-set changes without re-parsing the base commit.
+CREATE TABLE type_ifaces (
+    repo TEXT, commit_hash TEXT, type_name TEXT, interface_name TEXT, source_file TEXT,
+    PRIMARY KEY (repo, commit_hash, type_name, interface_name)
+);
+
+-- Added method_name to dispatch sites.
+-- Needed in step 4 to re-expand without re-parsing the call-site's file.
+ALTER TABLE interface_dispatch_sites ADD COLUMN method_name TEXT;
+```
+
+### Differential test harness
+
+```bash
+symex-harness \
+  -repo /path/to/local/clone \
+  -dsn "postgres://symex:symex@localhost/symex?sslmode=disable" \
+  -commits 25 \
+  -out harness_results.json
+```
+
+For each of the 25 commits:
+1. Applies incremental update from previous commit's graph
+2. Runs full rebuild from scratch
+3. Loads both edge sets and diffs them with `store.DiffEdgeSets`
+4. Reports PASS/FAIL + exact mismatched edges on failure
+
+**Expected output (passing run):**
+```
+[1/24] abc12345..def67890
+  changed files: [mux.go]
+  PASS  incr=412 edges, full=412 edges, incr_time=180ms full_time=2.1s speedup=11.7x
+
+[2/24] def67890..89abcdef
+  changed files: [middleware/logger.go]
+  PASS  incr=419 edges, full=419 edges, incr_time=95ms full_time=2.0s speedup=21.1x
+...
+════════════════════════════════════════
+Differential Harness Results
+Commits tested: 24
+PASS: 24  FAIL: 0  ERROR: 0
+Avg speedup (full/incr): 14.3x
+════════════════════════════════════════
+```
+
+**On failure, exact diff is printed:**
+```
+[8/24] ...
+  FAIL  incr=415 edges, full=417 edges
+  Only in FULL BUILD (missing from incremental):
+    [interface_resolved] pkg.Caller → pkg.(NewType).Method
+    [interface_resolved] pkg.OtherCaller → pkg.(NewType).Method
+```
+
+This tells you exactly which edges the incremental engine missed and why: a new type started implementing an interface whose call sites in other files weren't recomputed (step 2 failed).
+
+### New packages
+
+| Package | Role |
+|---|---|
+| `internal/incremental/engine.go` | 4-step incremental update rule |
+| `internal/incremental/harness.go` | Differential correctness harness |
+| `internal/store/incremental.go` | File-level retraction, CopyGraphToCommit, DiffEdgeSets |
+| `internal/store/schema_v2.go` | type_ifaces table, DispatchSiteV2, SchemaV2 DDL |
+| `cmd/symex-harness/main.go` | Harness CLI |
+
+### Running the harness
+
+```bash
+# Start Postgres
+docker-compose up -d
+
+# Bootstrap
+./scripts/bootstrap.sh
+
+# Run harness against chi (recommended: small, active, good interface usage)
+git clone https://github.com/go-chi/chi.git /tmp/chi-harness
+symex-harness -repo /tmp/chi-harness -dsn "postgres://symex:symex@localhost/symex?sslmode=disable" -commits 25
+
+# Run against a mid-sized repo (caddy, ~15k lines, heavier interface use)
+git clone https://github.com/caddyserver/caddy.git /tmp/caddy-harness
+symex-harness -repo /tmp/caddy-harness -dsn "..." -commits 20
+```

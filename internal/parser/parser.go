@@ -435,6 +435,7 @@ func classifyCall(
 		//   - If info.Selections has an entry for this selector, it is a method
 		//     call (either on a concrete type or on an interface).
 		//   - If not, it is a package-qualified function call (pkg.Func).
+
 		if sel, ok := info.Selections[fn]; ok {
 			// This is a method call: x.Method(...)
 			// Determine whether the receiver's type is an interface.

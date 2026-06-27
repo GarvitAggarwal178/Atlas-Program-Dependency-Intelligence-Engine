@@ -127,6 +127,7 @@ func Build(
 				// incremental engine in stage 3).
 				dispatchSites = append(dispatchSites, store.DispatchSite{
 					Repo:           repo,
+					CommitHash:     commitHash,
 					InterfaceName:  ifaceName,
 					CallSiteSymbol: ref.Caller,
 					CallSiteFile:   file.FilePath,
@@ -318,4 +319,133 @@ func LoadInMemory(ctx context.Context, db *store.DB, repo, commitHash string) (*
 		g.ReverseEdges[e.TargetSymbol] = append(g.ReverseEdges[e.TargetSymbol], e)
 	}
 	return g, nil
+}
+
+// BuildV2 is the same as Build but also populates the type_ifaces table and
+// uses DispatchSiteV2 (with method_name) for correct incremental updates.
+// This should be used instead of Build when incremental updates are enabled.
+func BuildV2(
+	ctx context.Context,
+	db *store.DB,
+	table *symboltable.RepoSymbolTable,
+	repo, commitHash string,
+) (*BuildResult, error) {
+	implementors, methodIndex := buildImplementorIndex(table)
+
+	var edges []store.Edge
+	var symRows []store.SymbolRow
+	var dispatchSitesV2 []store.DispatchSiteV2
+	var typeIfaces []store.TypeIface
+	result := &BuildResult{}
+
+	for _, file := range table.Files {
+		for _, sym := range file.Defined {
+			symRows = append(symRows, store.SymbolRow{
+				Repo:          repo,
+				CommitHash:    commitHash,
+				FilePath:      file.FilePath,
+				SymbolName:    sym.QualifiedName,
+				Kind:          string(sym.Kind),
+				LineStart:     sym.Lines.Start,
+				LineEnd:       sym.Lines.End,
+				CanonicalHash: sym.CanonicalHash,
+			})
+			if sym.Kind == symboltable.KindType {
+				for _, iface := range sym.ImplementedInterfaces {
+					typeIfaces = append(typeIfaces, store.TypeIface{
+						Repo:          repo,
+						CommitHash:    commitHash,
+						TypeName:      sym.QualifiedName,
+						InterfaceName: iface,
+						SourceFile:    file.FilePath,
+					})
+				}
+			}
+		}
+
+		for _, ref := range file.References {
+			switch ref.Kind {
+			case symboltable.CallDirect:
+				edges = append(edges, store.Edge{
+					Repo:         repo,
+					CommitHash:   commitHash,
+					SourceSymbol: ref.Caller,
+					TargetSymbol: ref.Callee,
+					Provenance:   "direct_call",
+					SourceFile:   file.FilePath,
+				})
+				result.DirectEdges++
+
+			case symboltable.CallInterfaceResolved:
+				ifaceName, methodName, err := parseInterfaceCallee(ref.Callee)
+				if err != nil {
+					edges = append(edges, store.Edge{
+						Repo:         repo,
+						CommitHash:   commitHash,
+						SourceSymbol: ref.Caller,
+						TargetSymbol: ref.Callee,
+						Provenance:   "interface_resolved",
+						SourceFile:   file.FilePath,
+					})
+					result.InterfaceResolvedEdges++
+					continue
+				}
+
+				dispatchSitesV2 = append(dispatchSitesV2, store.DispatchSiteV2{
+					Repo:           repo,
+					CommitHash:     commitHash,
+					InterfaceName:  ifaceName,
+					MethodName:     methodName,
+					CallSiteSymbol: ref.Caller,
+					CallSiteFile:   file.FilePath,
+				})
+
+				concreteTargets := expandInterfaceCall(ifaceName, methodName, implementors, methodIndex)
+				if len(concreteTargets) == 0 {
+					edges = append(edges, store.Edge{
+						Repo:         repo,
+						CommitHash:   commitHash,
+						SourceSymbol: ref.Caller,
+						TargetSymbol: ref.Callee,
+						Provenance:   "interface_resolved",
+						SourceFile:   file.FilePath,
+					})
+					result.InterfaceResolvedEdges++
+				} else {
+					for _, target := range concreteTargets {
+						edges = append(edges, store.Edge{
+							Repo:         repo,
+							CommitHash:   commitHash,
+							SourceSymbol: ref.Caller,
+							TargetSymbol: target,
+							Provenance:   "interface_resolved",
+							SourceFile:   file.FilePath,
+						})
+						result.InterfaceResolvedEdges++
+					}
+				}
+			}
+		}
+	}
+
+	if err := db.DeleteGraphForCommit(ctx, repo, commitHash); err != nil {
+		return nil, fmt.Errorf("delete old graph: %w", err)
+	}
+	if err := db.InsertSymbols(ctx, symRows); err != nil {
+		return nil, fmt.Errorf("insert symbols: %w", err)
+	}
+	if err := db.InsertEdges(ctx, edges); err != nil {
+		return nil, fmt.Errorf("insert edges: %w", err)
+	}
+	if err := db.InsertDispatchSitesV2(ctx, dispatchSitesV2); err != nil {
+		return nil, fmt.Errorf("insert dispatch sites v2: %w", err)
+	}
+	if err := db.InsertTypeIfaces(ctx, typeIfaces); err != nil {
+		return nil, fmt.Errorf("insert type_ifaces: %w", err)
+	}
+
+	result.TotalEdges = len(edges)
+	result.SymbolsIndexed = len(symRows)
+	result.DispatchSites = len(dispatchSitesV2)
+	return result, nil
 }

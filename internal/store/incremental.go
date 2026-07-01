@@ -185,12 +185,12 @@ func (s *DB) RetractFile(ctx context.Context, repo, commitHash, sourceFile strin
 	}
 	defer tx.Rollback()
 
-	// 1. Retract all call edges whose source is in this file.
+	// 1. Retract all CALL facts whose source is in this file.
 	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM call_edges
-		WHERE repo = $1 AND commit_hash = $2 AND source_file = $3
+		DELETE FROM facts
+		WHERE repo = $1 AND commit_hash = $2 AND kind = 'CALL' AND source_file = $3
 	`, repo, commitHash, sourceFile); err != nil {
-		return fmt.Errorf("retract call_edges for %s: %w", sourceFile, err)
+		return fmt.Errorf("retract facts for %s: %w", sourceFile, err)
 	}
 
 	// 2. Retract all symbol rows for this file.
@@ -241,7 +241,7 @@ func (s *DB) RetractFile(ctx context.Context, repo, commitHash, sourceFile strin
 // pair, delete interface_resolved edges from callSiteSymbol whose target
 // is a method on any type that implemented interfaceName at the base commit.
 // Since we retract BEFORE inserting new data, the targets that currently
-// exist in call_edges for this call site are exactly the OLD implementors'
+// exist in facts (kind='CALL') for this call site are exactly the OLD implementors'
 // methods — so we can simply delete all interface_resolved edges from the
 // call site symbol that came from files we know were implementing the interface.
 //
@@ -271,8 +271,9 @@ func (s *DB) RetractInterfaceEdgesForCallSites(
 	defer tx.Rollback()
 
 	stmt, err := tx.PrepareContext(ctx, `
-		DELETE FROM call_edges
+		DELETE FROM facts
 		WHERE repo = $1 AND commit_hash = $2
+		  AND kind = 'CALL'
 		  AND source_symbol = $3
 		  AND provenance = 'interface_resolved'
 	`)
@@ -310,7 +311,7 @@ func (s *DB) CopyGraphToCommit(ctx context.Context, repo, fromCommit, toCommit s
 	defer tx.Rollback()
 
 	// Delete any pre-existing data for toCommit.
-	for _, tbl := range []string{"call_edges", "symbols", "interface_dispatch_sites", "type_ifaces"} {
+	for _, tbl := range []string{"facts", "symbols", "interface_dispatch_sites", "type_ifaces"} {
 		if _, err := tx.ExecContext(ctx,
 			fmt.Sprintf("DELETE FROM %s WHERE repo=$1 AND commit_hash=$2", tbl),
 			repo, toCommit,
@@ -319,16 +320,18 @@ func (s *DB) CopyGraphToCommit(ctx context.Context, repo, fromCommit, toCommit s
 		}
 	}
 
-	// Copy call_edges.
+	// Copy facts (kind='CALL').
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO call_edges
-		    (repo, commit_hash, source_symbol, target_symbol, provenance, source_file)
-		SELECT repo, $1, source_symbol, target_symbol, provenance, source_file
-		FROM call_edges
+		INSERT INTO facts
+		    (repo, commit_hash, kind, source_symbol, target_symbol, provenance,
+		     source_file, source_module, source_module_version)
+		SELECT repo, $1, kind, source_symbol, target_symbol, provenance,
+		       source_file, source_module, source_module_version
+		FROM facts
 		WHERE repo = $2 AND commit_hash = $3
 		ON CONFLICT DO NOTHING
 	`, toCommit, repo, fromCommit); err != nil {
-		return fmt.Errorf("copy call_edges: %w", err)
+		return fmt.Errorf("copy facts: %w", err)
 	}
 
 	// Copy symbols.

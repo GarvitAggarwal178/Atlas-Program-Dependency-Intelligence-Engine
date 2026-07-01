@@ -1,9 +1,10 @@
 // Package store owns all Postgres interactions for the call graph engine.
 //
-// Schema is fixed by the project spec — do not alter column names or types.
-// The PRIMARY KEY on (repo, commit_hash, source_symbol, target_symbol) means
-// re-running a full build for the same commit is idempotent: ON CONFLICT DO
-// NOTHING skips duplicates without error.
+// Call edges are persisted in a generic "facts" table (kind = 'CALL' today;
+// other kinds are reserved for future fact types — see the project blueprint).
+// The PRIMARY KEY on (repo, commit_hash, kind, source_symbol, target_symbol)
+// means re-running a full build for the same commit is idempotent: ON CONFLICT
+// DO NOTHING skips duplicates without error.
 package store
 
 import (
@@ -18,14 +19,17 @@ import (
 // Schema is the DDL for the tables owned by this package.
 // Run once against a fresh database; safe to re-run (IF NOT EXISTS).
 const Schema = `
-CREATE TABLE IF NOT EXISTS call_edges (
-    repo            TEXT NOT NULL,
-    commit_hash     TEXT NOT NULL,
-    source_symbol   TEXT NOT NULL,
-    target_symbol   TEXT NOT NULL,
-    provenance      TEXT NOT NULL,   -- 'direct_call' | 'interface_resolved'
-    source_file     TEXT NOT NULL,
-    PRIMARY KEY (repo, commit_hash, source_symbol, target_symbol)
+CREATE TABLE IF NOT EXISTS facts (
+    repo                    TEXT NOT NULL,
+    commit_hash             TEXT NOT NULL,
+    kind                    TEXT NOT NULL,   -- only 'CALL' is populated today
+    source_symbol           TEXT NOT NULL,
+    target_symbol           TEXT NOT NULL,
+    provenance              TEXT NOT NULL,   -- 'direct_call' | 'interface_resolved'
+    source_file             TEXT NOT NULL,
+    source_module           TEXT NOT NULL,   -- the repo's own module path for in-repo facts
+    source_module_version   TEXT NOT NULL,   -- "" for the main repo itself
+    PRIMARY KEY (repo, commit_hash, kind, source_symbol, target_symbol)
 );
 
 CREATE TABLE IF NOT EXISTS symbols (
@@ -49,8 +53,8 @@ CREATE TABLE IF NOT EXISTS interface_dispatch_sites (
     PRIMARY KEY (repo, commit_hash, interface_name, call_site_symbol)
 );
 
-CREATE INDEX IF NOT EXISTS idx_call_edges_target
-    ON call_edges (repo, commit_hash, target_symbol);
+CREATE INDEX IF NOT EXISTS idx_facts_target
+    ON facts (repo, commit_hash, kind, target_symbol);
 
 CREATE INDEX IF NOT EXISTS idx_symbols_file
     ON symbols (repo, commit_hash, file_path);
@@ -59,6 +63,12 @@ CREATE INDEX IF NOT EXISTS idx_symbols_file
 // DB wraps a *sql.DB and provides domain-typed operations.
 type DB struct {
 	db *sql.DB
+	// modulePath is the main repo's own Go module path (from go.mod), used to
+	// populate facts.source_module for in-repo facts. Set via SetModulePath.
+	// Dependency-module facts (a different source_module/version) are not
+	// produced in this version — see project blueprint section on the
+	// generalized fact store.
+	modulePath string
 }
 
 // Open opens a connection to Postgres using the provided DSN and verifies
@@ -79,6 +89,14 @@ func Open(dsn string) (*DB, error) {
 // Close releases the underlying connection pool.
 func (s *DB) Close() error { return s.db.Close() }
 
+// SetModulePath records the main repo's own Go module path, used to populate
+// facts.source_module for facts inserted via InsertEdges. Call this once,
+// after resolving the module path (e.g. via internal/modpath), before any
+// build or incremental update runs against this DB handle.
+func (s *DB) SetModulePath(modulePath string) {
+	s.modulePath = modulePath
+}
+
 // ApplySchema creates all tables and indexes if they don't exist.
 func (s *DB) ApplySchema(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, Schema); err != nil {
@@ -87,7 +105,7 @@ func (s *DB) ApplySchema(ctx context.Context) error {
 	return nil
 }
 
-// Edge is a single row in call_edges.
+// Edge is a single row in the facts table (kind = 'CALL').
 type Edge struct {
 	Repo         string
 	CommitHash   string
@@ -95,6 +113,13 @@ type Edge struct {
 	TargetSymbol string
 	Provenance   string // "direct_call" | "interface_resolved"
 	SourceFile   string
+	// SourceModule and SourceModuleVersion identify which module the fact
+	// came from. Callers normally leave these empty; InsertEdges defaults
+	// SourceModule to the DB's configured module path (the main repo itself)
+	// and SourceModuleVersion to "" — dependency-module facts are not
+	// produced in this version.
+	SourceModule        string
+	SourceModuleVersion string
 }
 
 // SymbolRow is a single row in the symbols table.
@@ -118,8 +143,13 @@ type DispatchSite struct {
 	CallSiteFile   string
 }
 
-// InsertEdges bulk-inserts call edges inside a single transaction.
-// Duplicate edges (same primary key) are silently skipped.
+// InsertEdges bulk-inserts call edges (as facts with kind='CALL') inside a
+// single transaction. Duplicate edges (same primary key) are silently skipped.
+//
+// SourceModule defaults to the DB's configured module path (s.modulePath, the
+// main repo itself) and SourceModuleVersion defaults to "" when an edge
+// doesn't set them explicitly — every fact produced today comes from the
+// repo's own source, not a dependency.
 func (s *DB) InsertEdges(ctx context.Context, edges []Edge) error {
 	if len(edges) == 0 {
 		return nil
@@ -131,9 +161,10 @@ func (s *DB) InsertEdges(ctx context.Context, edges []Edge) error {
 	defer tx.Rollback() // no-op after Commit
 
 	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO call_edges
-		    (repo, commit_hash, source_symbol, target_symbol, provenance, source_file)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO facts
+		    (repo, commit_hash, kind, source_symbol, target_symbol, provenance,
+		     source_file, source_module, source_module_version)
+		VALUES ($1, $2, 'CALL', $3, $4, $5, $6, $7, $8)
 		ON CONFLICT DO NOTHING
 	`)
 	if err != nil {
@@ -142,9 +173,14 @@ func (s *DB) InsertEdges(ctx context.Context, edges []Edge) error {
 	defer stmt.Close()
 
 	for _, e := range edges {
+		mod := e.SourceModule
+		if mod == "" {
+			mod = s.modulePath
+		}
 		if _, err := stmt.ExecContext(ctx,
 			e.Repo, e.CommitHash, e.SourceSymbol,
 			e.TargetSymbol, e.Provenance, e.SourceFile,
+			mod, e.SourceModuleVersion,
 		); err != nil {
 			return fmt.Errorf("insert edge %s->%s: %w", e.SourceSymbol, e.TargetSymbol, err)
 		}
@@ -217,13 +253,15 @@ func (s *DB) InsertDispatchSites(ctx context.Context, sites []DispatchSite) erro
 	return tx.Commit()
 }
 
-// LoadEdges retrieves all edges for a specific (repo, commit_hash) into memory.
-// This is the read path used by the reachability engine to load the graph.
+// LoadEdges retrieves all CALL facts for a specific (repo, commit_hash) into
+// memory. This is the read path used by the reachability engine to load the
+// graph.
 func (s *DB) LoadEdges(ctx context.Context, repo, commitHash string) ([]Edge, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT source_symbol, target_symbol, provenance, source_file
-		FROM call_edges
-		WHERE repo = $1 AND commit_hash = $2
+		SELECT source_symbol, target_symbol, provenance, source_file,
+		       source_module, source_module_version
+		FROM facts
+		WHERE repo = $1 AND commit_hash = $2 AND kind = 'CALL'
 	`, repo, commitHash)
 	if err != nil {
 		return nil, fmt.Errorf("query edges: %w", err)
@@ -235,7 +273,8 @@ func (s *DB) LoadEdges(ctx context.Context, repo, commitHash string) ([]Edge, er
 		var e Edge
 		e.Repo = repo
 		e.CommitHash = commitHash
-		if err := rows.Scan(&e.SourceSymbol, &e.TargetSymbol, &e.Provenance, &e.SourceFile); err != nil {
+		if err := rows.Scan(&e.SourceSymbol, &e.TargetSymbol, &e.Provenance, &e.SourceFile,
+			&e.SourceModule, &e.SourceModuleVersion); err != nil {
 			return nil, fmt.Errorf("scan edge: %w", err)
 		}
 		edges = append(edges, e)
@@ -288,7 +327,7 @@ func (s *DB) LoadSymbolsForFiles(ctx context.Context, repo, commitHash string, f
 	return result, rows.Err()
 }
 
-// DeleteGraphForCommit removes all call_edges and symbols for a (repo, commit)
+// DeleteGraphForCommit removes all facts and symbols for a (repo, commit)
 // pair. Used when re-running a full build for the same commit.
 func (s *DB) DeleteGraphForCommit(ctx context.Context, repo, commitHash string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -296,7 +335,7 @@ func (s *DB) DeleteGraphForCommit(ctx context.Context, repo, commitHash string) 
 		return err
 	}
 	defer tx.Rollback()
-	for _, tbl := range []string{"call_edges", "symbols", "interface_dispatch_sites", "type_ifaces"} {
+	for _, tbl := range []string{"facts", "symbols", "interface_dispatch_sites", "type_ifaces"} {
 		if _, err := tx.ExecContext(ctx,
 			fmt.Sprintf("DELETE FROM %s WHERE repo=$1 AND commit_hash=$2", tbl),
 			repo, commitHash,
@@ -307,12 +346,12 @@ func (s *DB) DeleteGraphForCommit(ctx context.Context, repo, commitHash string) 
 	return tx.Commit()
 }
 
-// EdgeCount returns the number of edges stored for a (repo, commit) pair.
+// EdgeCount returns the number of CALL facts stored for a (repo, commit) pair.
 // Useful for sanity-checking after a build.
 func (s *DB) EdgeCount(ctx context.Context, repo, commitHash string) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM call_edges WHERE repo=$1 AND commit_hash=$2",
+		"SELECT COUNT(*) FROM facts WHERE repo=$1 AND commit_hash=$2 AND kind='CALL'",
 		repo, commitHash,
 	).Scan(&n)
 	return n, err

@@ -28,6 +28,26 @@ under the user's own git identity (no Claude co-author trailer).
 **Status at end of session:** (updated as work proceeds — see task list
 below for what's in flight.)
 
+### Real-world smoke test against chi (not committed, just a check)
+
+Ran the actual pipeline (`IndexCommitFromRepo`, real git checkouts) against
+15 real commits from an early slice of `go-chi/chi`'s history (the local
+`chi/` clone), not a synthetic fixture. Zero commits skipped as poison, all
+15 built cleanly, ended with 542 live facts including sane
+`interface_resolved` edges against real stdlib interfaces
+(`net/http.Handler.ServeHTTP`, `context.Context.Value`). Several commits
+that only touched non-Go files correctly produced `opened=0 closed=0
+unchanged=0` — confirming selective invalidation is actually engaging
+against real-world code, not just the synthetic tests.
+
+This was a throwaway script (temporarily placed under `cmd/` to get
+module-internal import access, deleted afterward — not committed) and a
+temporary local branch in the `chi/` clone (also deleted, `chi/` restored
+to its original HEAD). Not a permanent test — chi isn't guaranteed present
+for other people running this repo, and it's slow (15 real go/packages
+type-checks). Just wanted real signal beyond hand-built fixtures before
+calling this phase done, and got it.
+
 ### DRed reachability (§4) — started
 
 Added `internal/reach` (pure BFS reachability + a faithful simulation of

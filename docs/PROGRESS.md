@@ -37,8 +37,37 @@ below for what's in flight.)
 | 3 | Crash consistency + poison-input gate | **Done.** See below. |
 | 4 | Interval store (facts, commits, linearization fingerprint) | **Done.** See below. |
 | 5 | Derivation tracking, implementer-set hashing | **Done.** See below. |
-| 6 | IMPLEMENTS probe | Not started |
+| 6 | IMPLEMENTS probe | **Done. PASSED.** See below — this is the load-bearing result of the session. |
 | 7+ | Everything else | Not started this session |
+
+### Step 6 detail (the IMPLEMENTS probe, §8) — done, and it PASSED
+
+This is the single highest-information result of the session:
+architecture.md section 8 says adding a new fact kind (IMPLEMENTS) should
+require **zero new hand-written invalidation code** if the section 2.2
+derivation model is actually sound as designed. It's explicitly framed as
+a falsification test — "if it fails, you have learned that at a cost of
+hours instead of weeks" — so it was worth running now, before anything
+else (DRed, backward validation, etc.) gets built on top of an assumption
+that might not hold.
+
+**Result: it passed.** `internal/store/implements_probe_test.go` adds a
+new fact kind end to end — open, record its derivation, detect it as stale
+when its input changes, close it, re-derive it — using **only** the
+existing `OpenFact`/`RecordDerivation`/`StaleLiveFacts`/`CloseFactByID`
+functions written in steps 4-5 for `CALL` facts, which have zero knowledge
+that an `IMPLEMENTS` kind would ever exist. The only non-test change was
+two string constants (`FactKindImplements`, `ProvenanceImplements`) in
+`schema_v4.go` — 15 lines, no logic. `git diff --stat` on the non-test file
+confirms this literally, not just by argument.
+
+**What this licenses going forward:** per architecture.md's own framing,
+this result is strong enough to "ship the diff in the README as the
+demonstration" once a README rewrite happens (out of scope this session —
+see docs/FLAGGED.md's Atlas/symex naming question, which blocks a README
+rewrite). More immediately, it means DRed (build-order step 9) and
+backward validation (step 10) can proceed on top of derivation tracking
+without the doubt a failed probe would have introduced.
 
 ### Step 5 detail (derivation tracking, implementer-set hashing) — done
 

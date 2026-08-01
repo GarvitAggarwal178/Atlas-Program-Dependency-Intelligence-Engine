@@ -59,6 +59,21 @@ type Fact struct {
 
 const (
 	FactKindCall = "CALL"
+
+	// FactKindImplements is the new fact kind added by the section 8
+	// IMPLEMENTS probe (internal/store/implements_probe_test.go): a
+	// concrete type implements an interface. Its provenance is
+	// ProvenanceImplements; it carries no call_site (empty string is used,
+	// which is fine for facts_live_uniq — the pair (source_symbol,
+	// target_symbol) is already unique per this kind+provenance since
+	// call_site and provenance are both constant across all IMPLEMENTS facts).
+	FactKindImplements = "IMPLEMENTS"
+
+	// ProvenanceImplements is the provenance value for IMPLEMENTS facts.
+	// Unlike CALL facts (direct_call | interface_resolved), an IMPLEMENTS
+	// fact is never an over-approximation — go/types.Implements is exact —
+	// so there is only one provenance value for this kind.
+	ProvenanceImplements = "implements"
 )
 
 // ApplySchemaV4 creates the atlas.facts table and its indexes. Requires

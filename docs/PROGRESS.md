@@ -119,6 +119,36 @@ wired into the parser/callgraph pipeline — nothing yet calls
 "index a real commit end-to-end through derivation tracking" loop. That
 wiring, plus the actual §8 IMPLEMENTS probe, is the next task.
 
+### Post-step-6: closed the `atlas.commits` population gap
+
+Step 4's PROGRESS entry flagged that `atlas.commits` wasn't yet populated
+by `linearize.Walk` — this closes that specific gap (not full step-7/8
+wiring, which still needs the parser connected to `OpenFact`/derivation
+tracking for real facts). `internal/store/linearization_sync.go` adds
+`(*DB) SyncCommits(ctx, repoDir, branch, repo)`: walks fresh, verifies the
+linearization fingerprint against any existing watermark (refusing with a
+clear error on mismatch — architecture.md section 2.1's "refuse to proceed
+and require a full re-index," not just logged, an actual returned error),
+and idempotently inserts new commit rows.
+
+`TestSyncCommits_RefusesOnRebase` is the end-to-end version of
+`linearize`'s unit test: seeds a real watermark via `ApplyDelta` the way
+real fact-derivation would, rewrites history with a real `git commit
+--amend`, and confirms `SyncCommits` itself (not just the underlying
+`linearize.VerifyFingerprint` helper) refuses.
+
+**Still not done:** `SyncCommits` only populates the commit list — it does
+not derive any facts. The full "walk commits, and for each undelivered seq
+parse the repo and drive `OpenFact`/`CloseFactByKey`/`RecordDerivation`
+through `ApplyDelta`" loop (needed for build-order step 7's measurement
+against frozen v2, and step 8's fixtures) is genuinely substantial new work
+— wiring `internal/parser`'s `RepoSymbolTable` output into fact/derivation
+writes, deciding the natural key and derivation-input set for `CALL` facts
+specifically (which file/type/interface hashes a given call edge should be
+tied to), and handling the diff between "this delta's new fact set" and
+"currently live facts" (open new, close removed, leave unchanged facts
+alone). Not started this session — a good next task to pick up.
+
 ### Step 4 detail (interval store) — done
 
 **Linearization (§2.1):** new `internal/linearize` package, no DB

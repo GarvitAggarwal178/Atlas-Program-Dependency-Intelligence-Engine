@@ -161,6 +161,17 @@ func (s *DB) RecordSkippedCommit(ctx context.Context, sc SkippedCommit) error {
 	return nil
 }
 
+// CommitCount returns the number of rows in atlas.commits for repo.
+func (s *DB) CommitCount(ctx context.Context, repo string) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM atlas.commits WHERE repo = $1`, repo,
+	).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count commits: %w", err)
+	}
+	return n, nil
+}
+
 // SkipRate returns (skipped, total, rate) for a repo — the fraction of
 // commits in the linearized sequence that were refused by the poison-input
 // gate. architecture.md section 3.2: "The skip rate is part of every

@@ -10,3 +10,4 @@ One line per commit. Human-readable, no filler.
 - Add internal/linearize (first-parent commit walk + rebase-detecting fingerprint) and the atlas.facts interval-based schema with OpenFact/CloseFact/QueryFactsAt.
 - Add derivation tracking (atlas.derivations, atlas.interface_implementers) with implementer-set hashing and the StaleLiveFacts invalidation query; section 2.2 soundness fixture passes end to end.
 - Add and PASS the section 8 IMPLEMENTS probe: a new fact kind requires zero new invalidation code, confirmed by diff, not just argument.
+- Add SyncCommits: populates atlas.commits from a fresh linearize.Walk and refuses on a detected history rewrite (real end-to-end rebase-refusal test, not just unit-level).

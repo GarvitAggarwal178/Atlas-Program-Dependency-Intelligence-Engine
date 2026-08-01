@@ -14,3 +14,4 @@ One line per commit. Human-readable, no filler.
 - Add internal/index (ComputeFacts/ApplyFacts/IndexCommitFromRepo): the real parser-to-interval-store pipeline, with an end-to-end section 2.2 fixture run against actual parsed Go source instead of hand-built facts, and the poison gate wired in for real.
 - Add store.ListCommits and index.RunIndexer: drives IndexCommitFromRepo across a real multi-commit git history via real checkouts.
 - Fix CheckPoison: zero loaded packages (e.g. a go.mod-only commit) is Clean, not poison — found via RunIndexer's end-to-end test against real history.
+- Add section 9.1 fixtures 1, 2, 4, 6, 7 as index-pipeline integration tests; flag that internal/index is full-rebuild-via-diff, not yet selective, so a section 10.1 measurement would be misleading right now.

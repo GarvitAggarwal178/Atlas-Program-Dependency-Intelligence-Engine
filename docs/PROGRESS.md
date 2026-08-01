@@ -28,6 +28,54 @@ under the user's own git identity (no Claude co-author trailer).
 **Status at end of session:** (updated as work proceeds — see task list
 below for what's in flight.)
 
+### Post-step-6, part 4: §9.1 fixtures 1, 2, 4, 6, 7
+
+`internal/index/fixtures_test.go`. Fixture 3 already covered
+(`TestIndexCommitFromRepo_EndToEndSection2_2`); fixture 8 needs DRed
+(step 9, not built). Each fixture indexes a small synthetic module twice —
+no git repo needed, since `IndexCommitFromRepo` only needs a
+`go/packages`-loadable directory, not VCS history — mutating source on
+disk between calls the way a real commit would:
+
+- **Fixture 1** (add a method to a dispatched interface): new method +
+  new call site both appear correctly; existing dispatch edges untouched.
+- **Fixture 2** (remove a method from a dispatched interface): the
+  withdrawn method's dispatch edge is closed; an unrelated dispatch edge
+  through the same interface survives.
+- **Fixture 4** (remove the only implementer): the concrete edge closes
+  and the raw fallback edge (interface-method-descriptor target, no known
+  implementers) opens — confirms `ComputeFacts`'s "don't silently drop
+  information" fallback actually fires end to end, not just in the
+  unit-level v2-inherited logic.
+- **Fixture 6** (signature change without body change): the edge survives
+  (same natural key) but its recorded `FILE` derivation hash is proven —
+  via `StaleLiveFacts` against both the real old and real new content
+  hashes, not an arbitrary placeholder — to have actually been refreshed.
+  Caught and fixed a genuinely vacuous first version of this assertion
+  (comparing against an arbitrary string that would trivially differ from
+  anything) before it got committed.
+- **Fixture 7** (rename + reuse the old name for a different symbol, same
+  commit): a function is renamed and a NEW, unrelated function reuses the
+  old name in the same edit; asserts the live fact set reflects the NEW
+  code's actual call graph (including the new function's own outgoing
+  edge), not a conflation of old and new.
+
+**Important scope note, discovered while about to attempt step 7:**
+`internal/index` is a **correct full-rebuild-via-diff** pipeline —
+`ComputeFacts` re-derives every file on every commit, and `ApplyFacts`'s
+`Closed` count is, by construction, always exactly "what differs from the
+prior full derivation." That's sound (proven by every test above and by
+`RunIndexer`), but it means `StaleLiveFacts` isn't actually driving what
+gets re-derived yet — steps 5-6 proved the invalidation-query primitive is
+correct in isolation, but nothing in the real pipeline uses it to skip
+unaffected work. Running architecture.md §10.1's invalidation-precision
+measurement against this pipeline right now would report a trivial ~1.0
+ratio that means "we recompute everything and diff," not "invalidation is
+precise" — a misleading number. Did not run that measurement. Full
+writeup, including what real selective invalidation would require, in
+docs/FLAGGED.md. Fixture correctness testing (this section) doesn't depend
+on resolving that gap, which is why it was done instead.
+
 **Build-order progress (architecture.md §13):**
 
 | Step | What | Status |

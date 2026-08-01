@@ -137,6 +137,51 @@ follows the existing (gitignored) convention rather than fighting it.
 
 ---
 
+## [2026-08-01] `internal/index` is "correct full-rebuild-via-diff," not yet selective — blocks a meaningful §10.1 measurement
+
+**What this means concretely:** `ComputeFacts` re-derives facts for
+**every** file in the repo on every commit (a full parse pass), and
+`ApplyFacts` diffs the result against the currently-live fact set to
+decide what to open/close. This is architecturally correct — `RunIndexer`
+proves the resulting live-fact-set at each commit matches the real call
+graph, including across the exact section 2.2 adversarial case (a new
+interface implementer in an unrelated file) — but it means `ApplyFacts`'s
+`Closed` count is, by construction, **always exactly** "the facts that
+actually differ between this commit and the last," because that's
+literally what it's computing (a diff of two full derivations), not a
+result of `StaleLiveFacts`-driven selective re-derivation actually
+skipping unaffected work.
+
+**Why this blocks step 7 specifically:** architecture.md §10.1's
+invalidation-precision measurement is "facts withdrawn ÷ facts that
+actually differed under full rebuild." For the current `internal/index`
+pipeline, withdrawn-facts and actually-differed-facts are **the same
+computation** — the ratio would trivially equal 1.0 on every commit, not
+because invalidation is precise, but because there is no invalidation
+DECISION being measured yet. Running this measurement now and reporting a
+1.0 ratio would misrepresent what's been built — it would look like a
+perfect result while actually meaning "we didn't test the thing §10.1
+exists to test."
+
+**What real selective invalidation would require, not yet built:** detect
+which files changed between consecutive commits (via `git diff
+--name-only`, same as v2's `internal/differ`/`internal/incremental`
+already do), re-derive facts only for those files plus whatever
+`StaleLiveFacts` identifies as transitively affected (interface
+implementer-set changes, etc.), and leave every other file's facts
+untouched rather than recomputing and re-diffing them. `StaleLiveFacts`
+and `UpsertInterfaceImplementers` (steps 5-6) already provide the correct
+primitives for this — `internal/index` just isn't using them to skip work
+yet, only to prove correctness of the diff-based approach.
+
+**Current call:** did not attempt §10.1's measurement with a misleading
+methodology. Proceeding instead with build-order step 8 (the remaining
+§9.1 fixtures), which test correctness of the resulting fact set — a
+property the current full-rebuild-via-diff pipeline can already
+legitimately be judged against, independent of whether it's selective yet.
+Building real selective invalidation is flagged here as the prerequisite
+for step 7 to mean what it claims to mean.
+
 ## [2026-08-01] §10.3 govulncheck differential — scope/resources
 
 architecture.md §10.3 requires selecting real repos, normalizing against

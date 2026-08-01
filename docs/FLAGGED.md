@@ -191,6 +191,38 @@ legitimately be judged against, independent of whether it's selective yet.
 Building real selective invalidation is flagged here as the prerequisite
 for step 7 to mean what it claims to mean.
 
+## [2026-08-01] MODULE deltas: version tracking is real, fact invalidation isn't wired — and shouldn't be faked
+
+`internal/modver` (real go.mod parsing) and `atlas.dependency_versions`
+(real interval-maintenance, tested) exist now. What's deliberately NOT
+built: actually tying any fact to a dependency's version so a bump
+withdraws it.
+
+**Why not:** the current fact-derivation model (`internal/index.ComputeFacts`)
+only derives facts from the analyzed repo's OWN source — `LoadPackages`
+loads `"./..."`, the main module's own packages. It does not parse or
+derive facts from a dependency's source, and `collectAllInterfaces` (see
+the cross-package fix above) only scans `pkgs` from that same "./..." load
+— it never sees a dependency's own interface declarations either. That
+means there is currently no fact in the system whose correctness actually
+depends on a specific dependency version: nothing to honestly attach a
+`MODULE` derivation to.
+
+I could have wired `UpsertDependencyVersion`'s `changed` signal into
+`StaleLiveFacts(MODULE, ...)` calls anyway, but every fact's `MODULE`
+input would be fabricated — recorded without ever having been consulted
+during derivation. That would look like working invalidation in a demo
+and silently invalidate nothing real, which is worse than not building it:
+it's the over-invalidation-is-a-number, under-invalidation-is-a-bug
+asymmetry from section 2.2, except inverted into "looks wired, isn't."
+
+**What real MODULE-delta support requires:** expanding `ComputeFacts` (or
+a parallel path) to also derive facts from dependency-module source —
+loading and scanning packages outside `"./..."` with `NeedSyntax` — which
+is a real, separate expansion of the frontend's scope, not a small addition
+on top of what exists. Flagging as a real next task rather than
+half-building it.
+
 ## [2026-08-01] §10.3 govulncheck differential — scope/resources
 
 architecture.md §10.3 requires selecting real repos, normalizing against

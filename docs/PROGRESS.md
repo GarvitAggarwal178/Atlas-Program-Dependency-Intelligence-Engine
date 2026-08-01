@@ -28,7 +28,65 @@ under the user's own git identity (no Claude co-author trailer).
 **Status at end of session:** (updated as work proceeds — see task list
 below for what's in flight.)
 
-### /loop continuation: fixture 5, determinism, MODULE deltas, backward validation
+### /loop continuation, part 2: real incremental DRed + the §10.1 measurement
+
+**Real incremental DRed** — `internal/reach.IncrementalUpdate` implements
+architecture.md §4.3's actual over-delete/rederive/insert mechanism,
+replacing the full-BFS-recompute reachability maintenance built earlier as
+a correctness baseline. Full writeup of the algorithm and how hard it was
+validated before being trusted is in docs/DECISIONS.md — short version:
+~19,500 differential comparisons against the full recompute (results fed
+forward across sequences, not reset to ground truth each time), 5
+hand-traced degenerate cases including a diamond graph, then a real
+5-commit Go source sequence run through both paths side by side with
+`atlas.reachable_symbols` diffed after every commit. Both
+`MaintainReachability` (full recompute) and `MaintainReachabilityIncremental`
+are kept, same reasoning as keeping v2 as a frozen oracle rather than
+deleting it.
+
+**The §10.1 measurement (build-order step 7) — actually run, with real
+evidence.** The hard methodological problem here: measuring v2's ACTUAL
+over-invalidation requires observing its internal DELETE/INSERT churn
+(retract-then-reinsert-the-same-thing), not just before/after net
+differences — and v2's own frozen code can't be instrumented. Solved with
+a Postgres trigger on v2's own `facts` table
+(`internal/store/audit.go`) — a database-level observability addition,
+zero lines of v2's Go source touched.
+
+**The scenario** (`internal/index/measurement_10_1_test.go`) reproduces
+the EXACT over-invalidation mechanism v2's own code comments describe
+(`RetractInterfaceEdgesForCallSites`: "we retract ALL interface_resolved
+edges from these callers... not just the ones for the changed
+interface"): a function dispatches through two independent interfaces I1
+and I2; a commit changes I1's implementer set; I2 is completely
+unaffected.
+
+**Real result, both engines' actual unmodified code, not a simulation:**
+
+| | facts withdrawn | ground truth needed | ratio |
+|---|---|---|---|
+| v2 (real engine, audited) | 2 | 1 | **2.00x** |
+| v3.1 (real engine) | 1 | 1 | **1.00x** |
+
+v2 genuinely deleted the unrelated I2 edge (`Caller -> (X).M2`) along with
+the one that actually needed withdrawing (`Caller -> (A).M1`) — confirmed
+by the audit log, not inferred. v3.1 touched exactly the one edge that
+needed it. I10 (withdrawn ⊇ needed, asserted SEPARATELY as required — a
+ratio below 1.0 would mean unsound, not efficient) holds for both.
+
+**The honest, narrow claim this licenses** (architecture.md is explicit
+that anything broader is an overgeneralization from a population of one
+implementation): *"Measured that my own rule-based v2 engine
+over-invalidated by 2x on a controlled scenario reproducing its documented
+cross-interface retraction behavior, versus 1x (exact) for
+derivation-tracked maintenance, over the same commit transition."*
+**N=1 controlled scenario, stated as such** — this is illustrative and
+exactly reproducible (rerun twice, identical result both times), not a
+p50/p90/p99 statistical claim across many samples. A larger-N run against
+real commit history (e.g. chi) would be needed for that, and is not
+something this session attempted.
+
+### /loop continuation, part 1: fixture 5, determinism, MODULE deltas, backward validation
 
 Worked through the remaining task list from the last status report. Done,
 each with real tests and (where relevant) real bugs found and fixed

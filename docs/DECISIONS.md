@@ -82,6 +82,25 @@ property §2.2 demands.
 
 ---
 
+## [2026-08-01] Fact writes require a *sql.Tx, never a bare *sql.DB
+
+**Maps to:** architecture.md §3.1 (crash consistency) applied to §2.1/§2.3's
+fact-write paths.
+
+**Decision:** `store.OpenFact`, `store.CloseFactByKey`, `store.CloseFactByID`
+all take a `*sql.Tx` as a required parameter — there is no `(*DB) OpenFact(...)`
+convenience method that opens its own transaction.
+
+**Why:** §3.1's whole guarantee rests on every fact write happening inside
+the same transaction as the `repo_state` watermark update
+(`store.ApplyDelta`). If fact-write functions accepted a bare `*sql.DB`,
+it would be easy for future code (including future-me, in step 5+) to call
+them outside of `ApplyDelta` "just this once" for convenience, silently
+reopening the exact hole §3.1 exists to close. Requiring a `*sql.Tx`
+argument makes that mistake a compile error instead of a runtime footgun —
+the only way to get a `*sql.Tx` in this codebase is from inside an
+`ApplyDelta` callback.
+
 ## [2026-08-01] SIGKILL injection test trial count
 
 **Maps to:** architecture.md §3.1 ("≥500 trials, asserting recovery to a

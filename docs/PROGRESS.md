@@ -35,10 +35,61 @@ below for what's in flight.)
 | 1 | Prior-art reading, verify B/F/FBF citations | Deferred — flagged (docs/FLAGGED.md), needs explicit time-budget go-ahead |
 | 2 | Freeze v2, tag it | **Done.** Tagged `v2-frozen` at the commit that added architecture.md + docs scaffolding. |
 | 3 | Crash consistency + poison-input gate | **Done.** See below. |
-| 4 | Interval store (facts, commits, linearization fingerprint) | In progress this session |
+| 4 | Interval store (facts, commits, linearization fingerprint) | **Done.** See below. |
 | 5 | Derivation tracking, implementer-set hashing | Not started |
 | 6 | IMPLEMENTS probe | Not started |
 | 7+ | Everything else | Not started this session |
+
+### Step 4 detail (interval store) — done
+
+**Linearization (§2.1):** new `internal/linearize` package, no DB
+dependency (pure git + hashing). `Walk(repoDir, branch)` runs `git rev-list
+--first-parent` and assigns `seq` oldest-first; because a first-parent walk
+guarantees each entry's first parent is the next entry in the (reversed)
+list, parent hashes come for free with no extra `git log` calls.
+`Fingerprint(commits, upToSeq)` and `VerifyFingerprint(commits,
+lastAppliedSeq, storedFingerprint)` implement the rebase/force-push
+detection §2.1 requires. **Actually tested against a real rebase**, not
+just unit logic: `TestVerifyFingerprint_DetectsRebase` creates a real git
+repo, fingerprints it, runs `git commit --amend` (a genuine history
+rewrite), and asserts the fingerprint mismatch is caught.
+
+**Interval facts table (§2.1/§5):** `internal/store/schema_v4.go` adds
+`atlas.facts` — the exact §5 shape (`fact_id`, `valid_from`/`valid_to`,
+`facts_live_uniq` partial unique index, `facts_interval` index) — living in
+the `atlas` Postgres schema (see the step-3 schema-collision note; the same
+reasoning applies here, since v2's `facts` table already exists in
+`public`). `internal/store/interval.go` adds `OpenFact`/`CloseFactByKey`/
+`CloseFactByID` (all require a `*sql.Tx`, deliberately — no non-transactional
+fact-write path exists, so it's structurally hard to write a fact outside
+`ApplyDelta`'s transaction and reopen the §3.1 crash-consistency hole) and
+`QueryFactsAt`/`QueryLiveFacts` (accept either `*sql.DB` or `*sql.Tx`).
+
+**Invariants actually verified by test, not just asserted in prose:**
+- "Query at commit C" interval semantics
+  (`TestOpenFact_VisibleOnlyWithinItsInterval`): a fact is invisible before
+  `valid_from`, visible at and after `valid_from` while open, and invisible
+  from `valid_to` onward (exclusive) once closed — checked at multiple
+  `seq` values, not just one.
+- **I2** (at most one open interval per logical fact) — `TestFactsLiveUniq_
+  RejectsSecondOpenInterval` proves the database itself rejects a second
+  concurrent open interval for the same natural key (not just "the code
+  happens not to do this"), and that the failure correctly rolls back the
+  whole delta (watermark stays at the prior seq).
+- **I3** (`valid_to IS NULL OR valid_to > valid_from`) —
+  `TestFactsCheckConstraint_RejectsValidToBeforeValidFrom` proves the
+  `CHECK` constraint is live.
+
+**Not done as part of step 4:** `atlas.commits` is not yet populated by
+`linearize.Walk` automatically — that wiring (walk on startup, insert new
+rows via `InsertCommits`, verify fingerprint via `VerifyFingerprint` before
+resuming, refuse and require re-index on mismatch) is the "index this
+commit" loop that steps 5-7 need anyway once there's something to derive
+against; building it now against nothing to derive would be premature
+plumbing. `interface_implementers`, `dependency_versions`,
+`vulnerable_symbols`, `reachable_symbols` (§5's other tables) are correctly
+deferred to steps 5, 7, and 9 respectively — not needed yet and not added
+speculatively.
 
 ### Step 3 detail (crash consistency + poison-input gate) — done
 

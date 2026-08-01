@@ -67,6 +67,36 @@ func StaleLiveFacts(ctx context.Context, q queryer, repo, inputKind, inputKey, c
 	return scanFacts(rows)
 }
 
+// LiveFileHashes returns the recorded FILE input hash for every source
+// file that currently has at least one live fact, as a map[file]hash. Used
+// by the indexer to figure out which files actually changed since the
+// last commit without needing a separate "files" tracking table — we
+// already record this in derivations, might as well read it back from
+// there.
+func LiveFileHashes(ctx context.Context, q queryer, repo string) (map[string]string, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT DISTINCT ON (d.input_key) d.input_key, d.input_hash
+		FROM atlas.derivations d
+		JOIN atlas.facts f ON f.fact_id = d.fact_id
+		WHERE f.repo = $1 AND f.valid_to IS NULL AND d.input_kind = $2
+		ORDER BY d.input_key, d.fact_id
+	`, repo, InputKindFile)
+	if err != nil {
+		return nil, fmt.Errorf("live file hashes: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]string)
+	for rows.Next() {
+		var file, hash string
+		if err := rows.Scan(&file, &hash); err != nil {
+			return nil, fmt.Errorf("scan live file hash: %w", err)
+		}
+		result[file] = hash
+	}
+	return result, rows.Err()
+}
+
 // GetLiveInterfaceImplementerHash returns the currently-recorded
 // implementer-set hash for (repo, interfaceID), or ok=false if no live row
 // exists yet (the interface has never been seen, or every prior row was

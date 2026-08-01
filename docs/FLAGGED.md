@@ -255,6 +255,28 @@ is a real, separate expansion of the frontend's scope, not a small addition
 on top of what exists. Flagging as a real next task rather than
 half-building it.
 
+## [2026-08-01] Still open: govulncheck differential (§10.3) and performance crossover (§10.2)
+
+Of the three lower-priority items grouped together (citation verification,
+govulncheck differential, performance crossover), only citation
+verification got done this round (see the resolved entry above) — it was
+the one bounded, tool-available task in the group. The other two are
+genuinely different in kind, not just bigger:
+
+- **§10.3 govulncheck differential** needs picking real target repos, a
+  real OSV/govuln database integration, and a pre-registered disagreement
+  taxonomy committed before running anything — real scope/resource
+  decisions, not more coding against what already exists.
+- **§10.2 performance crossover** needs a stated load model, real
+  hardware description, and repeat-count/variance methodology — the
+  architecture doc is explicit that "one run on a laptop is not a number."
+
+Both are architecture.md's own explicitly-labeled "findings" steps (12-13
+of 15), correctly positioned after everything build-order steps 3-9
+deliver (which is now fully done, including real incremental DRed and a
+real, evidenced §10.1 measurement). Not started — genuinely needs a
+resourcing/scope decision from you, not just more autonomous coding time.
+
 ## [2026-08-01] §10.3 govulncheck differential — scope/resources
 
 architecture.md §10.3 requires selecting real repos, normalizing against

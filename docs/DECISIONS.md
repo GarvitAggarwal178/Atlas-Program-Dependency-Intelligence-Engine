@@ -101,6 +101,36 @@ argument makes that mistake a compile error instead of a runtime footgun —
 the only way to get a `*sql.Tx` in this codebase is from inside an
 `ApplyDelta` callback.
 
+## [2026-08-01] Test repo names must include a timestamp, not just t.Name()
+
+**Maps to:** general test hygiene for internal/index and internal/store
+integration tests, discovered via a real failure.
+
+**What happened:** `internal/index`'s first end-to-end test used
+`"index-e2e:" + t.Name()` as its repo identifier. Running that test alone
+passed. Running the full suite afterward failed with a Postgres CHECK
+constraint violation (`valid_to > valid_from`) while closing a fact — a
+real constraint firing correctly, but for the wrong reason: the earlier
+standalone run's data was still in the shared Postgres instance under the
+same repo name, so the second run's seq=0 tried to close a fact whose
+`valid_from` was 1 (from the PREVIOUS run) with `valid_to=0`. Investigated
+via `psql` before changing anything, per the instructions' emphasis on not
+papering over failures — confirmed the leftover row's repo name, deleted
+it, and only then decided this was a test-isolation bug, not a product bug.
+
+**Decision:** every integration test in this codebase that talks to the
+shared Postgres instance must derive its repo identifier from
+`t.Name() + time.Now().UnixNano()` (or equivalent), never `t.Name()`
+alone — `internal/store`'s tests already did this (`uniqueRepoName`);
+`internal/index`'s didn't, and that was the actual bug. Fixed by adding an
+equivalent `uniqueIndexTestRepo` helper.
+
+**Why this matters beyond this one fix:** it's a reminder that this test
+suite shares real, persistent state (a long-lived Postgres container) across
+runs, unlike most Go unit tests — collisions here look like product bugs
+(a CHECK constraint really did fire) but are actually a fixture problem.
+Any new integration test added later must follow the same convention.
+
 ## [2026-08-01] SIGKILL injection test trial count
 
 **Maps to:** architecture.md §3.1 ("≥500 trials, asserting recovery to a

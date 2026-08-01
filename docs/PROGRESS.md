@@ -147,7 +147,70 @@ writes, deciding the natural key and derivation-input set for `CALL` facts
 specifically (which file/type/interface hashes a given call edge should be
 tied to), and handling the diff between "this delta's new fact set" and
 "currently live facts" (open new, close removed, leave unchanged facts
-alone). Not started this session — a good next task to pick up.
+alone). **Update: this got built next — see below.**
+
+### Post-step-6, part 2: internal/index — the real parser->store pipeline
+
+New package `internal/index`, wiring `internal/parser`'s output into the
+derivation-tracked interval store for real, not just at the primitive
+level (steps 4-6 tested the store machinery with hand-constructed facts;
+this drives it from an actual parsed Go repo).
+
+- `ComputeFacts(repoRoot, modulePath, table)` — full derivation pass over a
+  parsed `RepoSymbolTable`: one `FactWithDerivations` per call reference.
+  `direct_call` refs record a `FILE` derivation only; `interface_resolved`
+  refs record `FILE` + `INTERFACE` (via `derive.ImplementerSetHash` over
+  the implementer set computed from the table itself), and reuse
+  `callgraph.ExpandInterfaceCall` — existing v2 code — for target
+  resolution rather than reimplementing it. `call_site` is `file:line`,
+  which disambiguates multiple call expressions cleanly.
+- `ApplyFacts(ctx, tx, repo, seq, newFacts)` — diffs the computed fact set
+  against the currently-live set by natural key (mirroring
+  `facts_live_uniq` exactly): opens new facts, closes withdrawn ones,
+  refreshes derivations for facts whose natural key is unchanged (so a
+  later commit's `StaleLiveFacts` call stays accurate even when a fact's
+  *edge* didn't change but one of its recorded input hashes did, e.g. a
+  comment-only edit).
+- `IndexCommitFromRepo(ctx, db, repoRoot, modulePath, repo, seq,
+  fingerprint)` — the actual end-to-end entry point: `LoadPackages` ->
+  `CheckPoison` (records a skip and returns cleanly, no error, if poison)
+  -> `BuildSymbolTable` -> `ComputeFacts` -> `ApplyFacts`, all inside one
+  `ApplyDelta` transaction.
+
+**`TestIndexCommitFromRepo_EndToEndSection2_2`** is the real-pipeline
+version of the store-level `TestSection2_2Fixture` and `TestImplementsProbe`
+— no hand-constructed facts. It copies `testdata/fixture` to a mutable temp
+dir (using `os.CopyFS`, Go 1.23+), indexes it as "commit 0" (asserts the
+`Ledger.Debit` dispatch site correctly has 2 targets, `SQLLedger` and
+`InMemoryLedger`), then adds a brand-new file implementing a third
+`Ledger`-implementing type (`CacheLedger`) — a file the dispatch site's own
+`FILE` derivation has no relationship to — indexes it as "commit 1," and
+confirms the dispatch site gains the third target while keeping the first
+two. This is architecture.md §9.1's fixture 3, run through the actual
+parser and store, not a hand-built scenario.
+
+**`TestIndexCommitFromRepo_PoisonCommitIsSkippedNotIndexed`** confirms the
+poison gate is wired into the real pipeline (not just parser-level): a
+commit with a genuine compile error is recorded in `skipped_commits` and
+produces zero live facts, with `IndexCommitFromRepo` returning
+`(nil, nil)` — a skip is a handled, expected outcome, not an error.
+
+**A real bug was found and fixed along the way** (test isolation, not a
+product defect) — see docs/DECISIONS.md's "Test repo names must include a
+timestamp" entry: the first end-to-end test used a non-timestamped repo
+name, collided with a prior manual run's leftover data in the shared
+Postgres instance, and tripped the `valid_to > valid_from` CHECK
+constraint correctly, for the wrong underlying reason. Investigated via
+direct `psql` inspection before concluding it was a fixture bug, fixed,
+and reran twice back-to-back to confirm.
+
+**Still not done:** this is a full-rebuild-and-diff pipeline, not a
+backward-validated incremental one (§2.3/step 10 — skipping re-parsing
+unchanged files — is still not built). It also doesn't yet drive from
+`SyncCommits`'s walked commit list automatically (no "for each
+un-applied seq, checkout that commit and call
+`IndexCommitFromRepo`" loop) — that loop plus real git checkouts is what
+build-order step 7 (measure against frozen v2) actually needs next.
 
 ### Step 4 detail (interval store) — done
 

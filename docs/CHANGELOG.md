@@ -11,3 +11,4 @@ One line per commit. Human-readable, no filler.
 - Add derivation tracking (atlas.derivations, atlas.interface_implementers) with implementer-set hashing and the StaleLiveFacts invalidation query; section 2.2 soundness fixture passes end to end.
 - Add and PASS the section 8 IMPLEMENTS probe: a new fact kind requires zero new invalidation code, confirmed by diff, not just argument.
 - Add SyncCommits: populates atlas.commits from a fresh linearize.Walk and refuses on a detected history rewrite (real end-to-end rebase-refusal test, not just unit-level).
+- Add internal/index (ComputeFacts/ApplyFacts/IndexCommitFromRepo): the real parser-to-interval-store pipeline, with an end-to-end section 2.2 fixture run against actual parsed Go source instead of hand-built facts, and the poison gate wired in for real.

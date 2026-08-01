@@ -66,10 +66,18 @@ internal/
   differ/                 — git diff → changed line ranges → changed symbols
   classifier/             — trivial / signature_change / logic_change classification
   incremental/            — v2's hand-written 4-step invalidation rule + differential harness
-                            (frozen oracle once tagged — see docs/DECISIONS.md)
-  store/                  — Postgres layer; v2 snapshot schema (facts/symbols/interface_dispatch_sites/type_ifaces)
-                            plus, as they land, the v3.1 interval/derivation schema (§5)
-testdata/fixture/        — synthetic Go repo used by parser/callgraph unit tests
+                            (frozen oracle at tag v2-frozen — see docs/DECISIONS.md; do not modify)
+  linearize/              — v3.1: first-parent commit walk + rebase/force-push-detecting fingerprint (§2.1)
+  derive/                 — v3.1: input-hash primitives, notably ImplementerSetHash (the §2.2 soundness fix)
+  index/                  — v3.1: the real parser -> interval-store pipeline (ComputeFacts/ApplyFacts/
+                            IndexCommitFromRepo) — ties parser+derive+store together per commit
+  store/                  — Postgres layer. v2 snapshot schema (facts/symbols/interface_dispatch_sites/
+                            type_ifaces, public schema) stays untouched, frozen oracle. v3.1 tables
+                            (commits/repo_state/skipped_commits/facts/derivations/interface_implementers,
+                            §5) live in a separate "atlas" Postgres schema — see docs/DECISIONS.md for why
+                            they can't share the "facts" name with v2 in the same database.
+testdata/fixture/        — synthetic Go repo used by parser/callgraph/index unit tests (gitignored — see docs/FLAGGED.md)
+testdata/broken_fixture/ — deliberately-broken fixture for poison-gate tests (same gitignore situation)
 chi/                      — untracked local clone of go-chi/chi, used as a real-world
                             harness fixture. Not project code. See docs/FLAGGED.md.
 ```

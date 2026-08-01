@@ -97,11 +97,6 @@ func ParseRepo(repoRoot, modulePath string) (*symboltable.RepoSymbolTable, error
 	if err != nil {
 		return nil, err
 	}
-
-	result := &symboltable.RepoSymbolTable{
-		ModulePath: modulePath,
-	}
-
 	for _, pkg := range pkgs {
 		// Log load errors per-package but continue — partial type info is
 		// still useful for packages that do load cleanly. See the doc
@@ -110,7 +105,24 @@ func ParseRepo(repoRoot, modulePath string) (*symboltable.RepoSymbolTable, error
 		for _, e := range pkg.Errors {
 			fmt.Fprintf(os.Stderr, "warn: %s: %v\n", pkg.PkgPath, e)
 		}
+	}
+	return BuildSymbolTable(pkgs, fset, repoRoot, modulePath), nil
+}
 
+// BuildSymbolTable extracts a RepoSymbolTable from an already-loaded
+// []*packages.Package (as returned by LoadPackages). Splitting this out of
+// ParseRepo lets callers that run the poison-input gate (CheckPoison) first
+// reuse the same extraction logic without a second packages.Load call.
+//
+// Per-package extraction errors are logged and that package is skipped;
+// this does NOT re-check pkg.Errors/TypesInfo completeness — callers that
+// need that check must call CheckPoison themselves before calling this.
+func BuildSymbolTable(pkgs []*packages.Package, fset *token.FileSet, repoRoot, modulePath string) *symboltable.RepoSymbolTable {
+	result := &symboltable.RepoSymbolTable{
+		ModulePath: modulePath,
+	}
+
+	for _, pkg := range pkgs {
 		files, err := extractPackageSymbols(pkg, repoRoot, fset)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warn: extracting %s: %v\n", pkg.PkgPath, err)
@@ -119,7 +131,7 @@ func ParseRepo(repoRoot, modulePath string) (*symboltable.RepoSymbolTable, error
 		result.Files = append(result.Files, files...)
 	}
 
-	return result, nil
+	return result
 }
 
 // parseFileWithComments is the ParseFile hook passed to packages.Config.

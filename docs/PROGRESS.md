@@ -28,6 +28,29 @@ under the user's own git identity (no Claude co-author trailer).
 **Status at end of session:** (updated as work proceeds — see task list
 below for what's in flight.)
 
+### DRed reachability (§4) — started
+
+Added `internal/reach` (pure BFS reachability + a faithful simulation of
+the naive support-counting mechanism the arch doc rejects), `atlas.reachable_symbols`
+schema, and `internal/index.MaintainReachability` wiring it into the
+store via the same open/close interval pattern as everything else.
+
+Ran fixture 8 twice: once as a pure algorithm test proving naive support
+counting actually keeps a self-supporting cycle alive forever (confirmed
+it fails first, per the instructions — a test that's never failed proves
+nothing), then again through the real pipeline (real Go source: main
+calls A, A and B call each other, delete main's call to A, confirm both A
+and B drop out of `reachable_symbols`).
+
+**Honest scope note:** this is a full BFS recompute every commit, not yet
+the incremental over-delete/rederive DRed algorithm §4.3 actually
+describes. The semantics is correct (least fixpoint, proven against the
+rejected alternative); the maintenance mechanism isn't the efficient one
+yet. Also not wired automatically into `IndexCommitFromRepo` — the
+entry-point model (binary vs library) is still an open question flagged
+earlier, so reachability maintenance is exposed as a function callers can
+invoke, not forced into the default pipeline.
+
 ### Post-step-6, part 4: §9.1 fixtures 1, 2, 4, 6, 7
 
 `internal/index/fixtures_test.go`. Fixture 3 already covered

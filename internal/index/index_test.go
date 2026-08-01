@@ -76,6 +76,9 @@ func openIndexTestDB(t *testing.T) *store.DB {
 	if err := db.ApplySchemaV5(ctx); err != nil {
 		t.Fatalf("apply schema v5: %v", err)
 	}
+	if err := db.ApplySchemaV8(ctx); err != nil {
+		t.Fatalf("apply schema v8: %v", err)
+	}
 	return db
 }
 

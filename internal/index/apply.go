@@ -226,6 +226,27 @@ func IndexCommitFromRepo(
 	}
 	changedFiles := diffFileHashes(oldHashes, newHashes)
 
+	// Invariant I13: an analyzer_version change invalidates all cached
+	// derivations. If the recorded version doesn't match what this build
+	// of the analyzer actually is, don't trust file-hash-based selectivity
+	// against facts that may have been derived by different logic — force
+	// a full re-apply by treating every file as changed, same as a fresh
+	// repo's first commit.
+	currentVersion := AnalyzerVersion()
+	recordedVersion, haveRecorded, err := db.GetAnalyzerVersion(ctx, repo)
+	if err != nil {
+		return nil, fmt.Errorf("get analyzer version: %w", err)
+	}
+	if haveRecorded && recordedVersion != currentVersion {
+		changedFiles = make(map[string]bool, len(newHashes))
+		for f := range newHashes {
+			changedFiles[f] = true
+		}
+		for f := range oldHashes {
+			changedFiles[f] = true
+		}
+	}
+
 	var stats Stats
 	err = db.ApplyDelta(ctx, repo, seq, fingerprint, func(ctx context.Context, tx *sql.Tx) error {
 		s, err := ApplyFacts(ctx, tx, repo, seq, facts, changedFiles)
@@ -235,5 +256,10 @@ func IndexCommitFromRepo(
 	if err != nil {
 		return nil, fmt.Errorf("apply delta seq=%d: %w", seq, err)
 	}
+
+	if err := db.SetAnalyzerVersion(ctx, repo, currentVersion); err != nil {
+		return nil, fmt.Errorf("set analyzer version: %w", err)
+	}
+
 	return &stats, nil
 }

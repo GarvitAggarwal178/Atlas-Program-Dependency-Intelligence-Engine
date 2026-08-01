@@ -137,7 +137,16 @@ follows the existing (gitignored) convention rather than fighting it.
 
 ---
 
-## [2026-08-01] `internal/index` is "correct full-rebuild-via-diff," not yet selective — blocks a meaningful §10.1 measurement
+## [2026-08-01] ~~`internal/index` is "correct full-rebuild-via-diff," not yet selective~~ — RESOLVED
+
+**Update:** fixed. `ApplyFacts` now actually uses `StaleLiveFacts` +
+changed-file detection to scope every open/close/refresh to just what
+changed — see the "make ApplyFacts actually selective" commit and
+`TestSelective_UntouchedFileFactsAreNeverTouched`, which proves it via
+`fact_id` stability (an untouched file's facts keep their exact fact_id
+across a commit that only touched a different file). A §10.1 measurement
+against real history could now mean something. Original writeup below,
+kept for the record.
 
 **What this means concretely:** `ComputeFacts` re-derives facts for
 **every** file in the repo on every commit (a full parse pass), and

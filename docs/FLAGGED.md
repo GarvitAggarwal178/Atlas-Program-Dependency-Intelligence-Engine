@@ -58,7 +58,39 @@ disappearing.
 
 ---
 
-## [2026-08-01] B/F and FBF citations unverified (architecture.md §4.3, §13 step 1)
+## [2026-08-01] ~~B/F and FBF citations unverified~~ — RESOLVED, verified from primary sources
+
+**Update:** verified via WebSearch + WebFetch against Motik's own Oxford
+CS publication page and the AAAI/journal records directly (not a
+secondhand summary):
+
+- **B/F**: Motik, B., Nenov, Y., Piro, R., & Horrocks, I. (2015).
+  "Incremental Update of Datalog Materialisation: the Backward/Forward
+  Algorithm." *Proceedings of the AAAI Conference on Artificial
+  Intelligence*, 29(1), pp. 1560–1568. AAAI-15, Austin, Texas, Jan 25–30
+  2015. Confirmed via `ojs.aaai.org` (the paper's own AAAI page) and the
+  PDF hosted directly on Motik's Oxford page.
+  architecture.md's efficiency claim — "B/F exists specifically because
+  DRed is inefficient when facts have many alternative derivations" — is
+  accurate to the paper's own stated motivation, confirmed by the
+  abstract/summary text, not just the title.
+- **FBF**: same four authors — Motik, Nenov, Piro, Horrocks (2019).
+  "Maintenance of Datalog Materialisations Revisited." *Artificial
+  Intelligence*, Volume 269, pp. 76–136. architecture.md's "~2019" hedge
+  is exact (not approximate), and its claim that FBF "reportedly also
+  presents counting that handles recursive rules" is confirmed: the paper
+  covers three algorithms (counting, DRed, FBF) with theoretical
+  complexity analysis, and states both DRed and B/F are instances of FBF
+  under specific parameter choices — i.e. FBF is the more general
+  algorithm the other two specialize from, exactly as architecture.md's
+  framing implies.
+
+Both citations check out; nothing needs correcting in architecture.md's
+§4.3 text. Recorded here so the verification itself (sources checked,
+not just "trust me") is on the record, per the section 13 build-order
+requirement to do this before writing any comparative sentence.
+
+## [2026-08-01] B/F and FBF citations unverified (architecture.md §4.3, §13 step 1) — superseded, see above
 
 architecture.md explicitly states: *"B/F and FBF were not verified directly
 — confirm authors, venue, and the efficiency claim from primary sources

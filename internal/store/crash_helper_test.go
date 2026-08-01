@@ -55,7 +55,7 @@ func TestHelperApplyDelta(t *testing.T) {
 	err = db.ApplyDelta(context.Background(), repo, seq, fmt.Sprintf("fp-%d", seq),
 		func(ctx context.Context, tx *sql.Tx) error {
 			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO commits (repo, seq, commit_hash) VALUES ($1, $2, $3)`,
+				`INSERT INTO atlas.commits (repo, seq, commit_hash) VALUES ($1, $2, $3)`,
 				repo, seq, fmt.Sprintf("sha-%d", seq),
 			); err != nil {
 				return err

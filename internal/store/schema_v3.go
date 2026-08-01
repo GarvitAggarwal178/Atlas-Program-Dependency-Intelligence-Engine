@@ -10,16 +10,23 @@ import (
 // linearized, crash-consistent commit sequence: the linearized commit list
 // itself, the crash-consistency watermark, and the poison-input skip log.
 //
-// These three tables are independent of the v2 snapshot schema (Schema in
-// store.go) and of the v3.1 interval-based facts schema (not yet added —
-// see build-order step 4). They can be applied and used on their own,
-// which is what build-order step 3 (crash consistency + poison-input gate)
-// requires.
+// SchemaV3 lives in its own Postgres schema, "atlas", not the default
+// "public" schema v2's tables occupy. architecture.md section 5 names one
+// of its tables "facts" — the exact same name as v2's existing snapshot
+// table (store.go's Schema constant). Since v2 must stay live, untouched,
+// and queryable as the frozen oracle (architecture.md section 9.2) in the
+// SAME database, "CREATE TABLE IF NOT EXISTS facts" for the v3.1 shape
+// would either collide with or silently no-op against v2's differently-
+// shaped table. A dedicated schema namespace ("atlas".*) sidesteps this
+// entirely and keeps the two engines' storage fully separate while sharing
+// one Postgres instance — see docs/DECISIONS.md.
 const SchemaV3 = `
+CREATE SCHEMA IF NOT EXISTS atlas;
+
 -- Linearized commit sequence (first-parent walk of one named branch).
 -- seq is the ONLY temporal coordinate anywhere in the v3.1 schema;
 -- authored_at is decorative and must never appear in an ORDER BY.
-CREATE TABLE IF NOT EXISTS commits (
+CREATE TABLE IF NOT EXISTS atlas.commits (
     repo        TEXT   NOT NULL,
     seq         BIGINT NOT NULL,
     commit_hash TEXT   NOT NULL,
@@ -33,7 +40,7 @@ CREATE TABLE IF NOT EXISTS commits (
 -- fact writes for last_applied_seq, per architecture.md section 3.1 — a
 -- delta is never considered applied unless its watermark write committed
 -- atomically with its data writes.
-CREATE TABLE IF NOT EXISTS repo_state (
+CREATE TABLE IF NOT EXISTS atlas.repo_state (
     repo                       TEXT PRIMARY KEY,
     last_applied_seq          BIGINT NOT NULL,
     linearization_fingerprint TEXT NOT NULL
@@ -43,7 +50,7 @@ CREATE TABLE IF NOT EXISTS repo_state (
 -- incomplete TypesInfo for at least one loaded package (architecture.md
 -- section 3.2). The skip rate computed from this table is part of every
 -- reported result, not a footnote.
-CREATE TABLE IF NOT EXISTS skipped_commits (
+CREATE TABLE IF NOT EXISTS atlas.skipped_commits (
     repo TEXT NOT NULL,
     seq  BIGINT NOT NULL,
     reason TEXT NOT NULL,   -- 'type_errors' | 'module_unavailable' | 'toolchain'
@@ -102,7 +109,7 @@ func (s *DB) InsertCommits(ctx context.Context, commits []Commit) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO commits (repo, seq, commit_hash, parent_hash)
+		INSERT INTO atlas.commits (repo, seq, commit_hash, parent_hash)
 		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (repo, seq) DO NOTHING
 	`)
@@ -130,7 +137,7 @@ func (s *DB) GetRepoState(ctx context.Context, repo string) (*RepoState, error) 
 	var rs RepoState
 	err := s.db.QueryRowContext(ctx, `
 		SELECT repo, last_applied_seq, linearization_fingerprint
-		FROM repo_state WHERE repo = $1
+		FROM atlas.repo_state WHERE repo = $1
 	`, repo).Scan(&rs.Repo, &rs.LastAppliedSeq, &rs.LinearizationFingerprint)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -144,7 +151,7 @@ func (s *DB) GetRepoState(ctx context.Context, repo string) (*RepoState, error) 
 // RecordSkippedCommit records that seq was deliberately not indexed.
 func (s *DB) RecordSkippedCommit(ctx context.Context, sc SkippedCommit) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO skipped_commits (repo, seq, reason, detail)
+		INSERT INTO atlas.skipped_commits (repo, seq, reason, detail)
 		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (repo, seq) DO UPDATE SET reason = EXCLUDED.reason, detail = EXCLUDED.detail
 	`, sc.Repo, sc.Seq, sc.Reason, sc.Detail)
@@ -160,12 +167,12 @@ func (s *DB) RecordSkippedCommit(ctx context.Context, sc SkippedCommit) error {
 // reported result, not a footnote."
 func (s *DB) SkipRate(ctx context.Context, repo string) (skipped, total int, err error) {
 	if err = s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM commits WHERE repo = $1`, repo,
+		`SELECT COUNT(*) FROM atlas.commits WHERE repo = $1`, repo,
 	).Scan(&total); err != nil {
 		return 0, 0, fmt.Errorf("count commits: %w", err)
 	}
 	if err = s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM skipped_commits WHERE repo = $1`, repo,
+		`SELECT COUNT(*) FROM atlas.skipped_commits WHERE repo = $1`, repo,
 	).Scan(&skipped); err != nil {
 		return 0, 0, fmt.Errorf("count skipped_commits: %w", err)
 	}

@@ -65,7 +65,7 @@ func TestApplyDelta_WatermarkCommitsAtomicallyWithData(t *testing.T) {
 
 	err = db.ApplyDelta(context.Background(), repo, 0, "fp-0", func(ctx context.Context, tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
-			INSERT INTO commits (repo, seq, commit_hash, parent_hash)
+			INSERT INTO atlas.commits (repo, seq, commit_hash, parent_hash)
 			VALUES ($1, 0, 'deadbeef', NULL)
 		`, repo)
 		return err
@@ -102,7 +102,7 @@ func TestApplyDelta_FailedDeltaLeavesNoWatermarkAdvance(t *testing.T) {
 
 	// Seed at seq 0 successfully.
 	if err := db.ApplyDelta(context.Background(), repo, 0, "fp-0", func(ctx context.Context, tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO commits (repo, seq, commit_hash) VALUES ($1, 0, 'aaa')`, repo)
+		_, err := tx.ExecContext(ctx, `INSERT INTO atlas.commits (repo, seq, commit_hash) VALUES ($1, 0, 'aaa')`, repo)
 		return err
 	}); err != nil {
 		t.Fatalf("seed ApplyDelta: %v", err)
@@ -112,7 +112,7 @@ func TestApplyDelta_FailedDeltaLeavesNoWatermarkAdvance(t *testing.T) {
 	// write.
 	wantErr := fmt.Errorf("simulated derivation failure")
 	err := db.ApplyDelta(context.Background(), repo, 1, "fp-1", func(ctx context.Context, tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO commits (repo, seq, commit_hash) VALUES ($1, 1, 'bbb')`, repo); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO atlas.commits (repo, seq, commit_hash) VALUES ($1, 1, 'bbb')`, repo); err != nil {
 			return err
 		}
 		return wantErr
@@ -131,7 +131,7 @@ func TestApplyDelta_FailedDeltaLeavesNoWatermarkAdvance(t *testing.T) {
 
 	var count int
 	if err := db.RawDB().QueryRowContext(context.Background(),
-		`SELECT COUNT(*) FROM commits WHERE repo = $1 AND seq = 1`, repo,
+		`SELECT COUNT(*) FROM atlas.commits WHERE repo = $1 AND seq = 1`, repo,
 	).Scan(&count); err != nil {
 		t.Fatalf("count seq=1 commits: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestSIGKILLInjection_RecoversToKnownSeq(t *testing.T) {
 
 		var commitCount int
 		if err := db.RawDB().QueryRowContext(context.Background(),
-			`SELECT COUNT(*) FROM commits WHERE repo = $1 AND seq = $2`, repo, seq,
+			`SELECT COUNT(*) FROM atlas.commits WHERE repo = $1 AND seq = $2`, repo, seq,
 		).Scan(&commitCount); err != nil {
 			t.Fatalf("trial %d: count commits: %v", i, err)
 		}
@@ -241,7 +241,7 @@ func TestSIGKILLInjection_RecoversToKnownSeq(t *testing.T) {
 					observedSeq = rs.LastAppliedSeq
 				}
 				db.RawDB().QueryRowContext(context.Background(),
-					`SELECT COUNT(*) FROM commits WHERE repo = $1 AND seq = $2`, repo, seq,
+					`SELECT COUNT(*) FROM atlas.commits WHERE repo = $1 AND seq = $2`, repo, seq,
 				).Scan(&commitCount)
 				isMismatch, _ = mismatch()
 			}

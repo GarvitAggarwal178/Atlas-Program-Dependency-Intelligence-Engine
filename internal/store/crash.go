@@ -44,7 +44,7 @@ func (s *DB) ApplyDelta(ctx context.Context, repo string, seq int64, fingerprint
 	}
 
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO repo_state (repo, last_applied_seq, linearization_fingerprint)
+		INSERT INTO atlas.repo_state (repo, last_applied_seq, linearization_fingerprint)
 		VALUES ($1, $2, $3)
 		ON CONFLICT (repo) DO UPDATE
 		    SET last_applied_seq = EXCLUDED.last_applied_seq,

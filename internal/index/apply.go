@@ -15,6 +15,26 @@ type Stats struct {
 	Opened    int // newly-live facts
 	Closed    int // facts withdrawn (present at the prior seq, absent now)
 	Unchanged int // facts live at both the prior seq and now (derivations refreshed)
+
+	// FilesTotal/FilesChanged are the backward-validation cache-hit
+	// diagnostic architecture.md section 2.3 asks for: "Report cache-hit
+	// rate as a diagnostic, not headline metric." FilesTotal-FilesChanged
+	// is how many files were skipped at the fact-write level this commit
+	// (go/packages still had to load and type-check them — that part
+	// isn't skippable without a frontend rewrite, see docs/FLAGGED.md —
+	// but nothing about them touched the database).
+	FilesTotal   int
+	FilesChanged int
+}
+
+// CacheHitRate returns the fraction of files that did NOT need touching
+// this commit (1.0 = nothing changed, 0.0 = everything did). Returns 0 for
+// FilesTotal == 0 rather than NaN.
+func (s Stats) CacheHitRate() float64 {
+	if s.FilesTotal == 0 {
+		return 0
+	}
+	return float64(s.FilesTotal-s.FilesChanged) / float64(s.FilesTotal)
 }
 
 // naturalKey mirrors atlas.facts_live_uniq exactly: (repo, kind,
@@ -220,9 +240,14 @@ func IndexCommitFromRepo(
 		return nil, fmt.Errorf("compute facts: %w", err)
 	}
 
-	oldHashes, err := store.LiveFileHashes(ctx, db.RawDB(), repo)
+	// LiveFileVersions (atlas.file_versions), not LiveFileHashes
+	// (atlas.derivations) — the latter is fact-anchored and blind to any
+	// file that produces zero facts (e.g. a file whose only function has
+	// an empty body), which would make such a file look "new" every
+	// single commit. See schema_v9.go's doc comment.
+	oldHashes, err := store.LiveFileVersions(ctx, db.RawDB(), repo)
 	if err != nil {
-		return nil, fmt.Errorf("live file hashes: %w", err)
+		return nil, fmt.Errorf("live file versions: %w", err)
 	}
 	changedFiles := diffFileHashes(oldHashes, newHashes)
 
@@ -247,15 +272,28 @@ func IndexCommitFromRepo(
 		}
 	}
 
+	allKnownFiles := make(map[string]bool, len(newHashes)+len(oldHashes))
+	for f := range newHashes {
+		allKnownFiles[f] = true
+	}
+	for f := range oldHashes {
+		allKnownFiles[f] = true
+	}
+
 	var stats Stats
 	err = db.ApplyDelta(ctx, repo, seq, fingerprint, func(ctx context.Context, tx *sql.Tx) error {
 		s, err := ApplyFacts(ctx, tx, repo, seq, facts, changedFiles)
+		if err != nil {
+			return err
+		}
 		stats = s
-		return err
+		return store.UpdateFileVersions(ctx, tx, repo, seq, newHashes)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("apply delta seq=%d: %w", seq, err)
 	}
+	stats.FilesTotal = len(allKnownFiles)
+	stats.FilesChanged = len(changedFiles)
 
 	if err := db.SetAnalyzerVersion(ctx, repo, currentVersion); err != nil {
 		return nil, fmt.Errorf("set analyzer version: %w", err)

@@ -32,24 +32,91 @@ func naturalKey(repo string, f store.Fact) string {
 // the source file; keeping derivations current is what lets a LATER
 // commit's StaleLiveFacts call be accurate).
 //
+// changedFiles scopes the work to what actually needs touching: a fact is
+// only considered for opening/closing/refreshing if its own source file is
+// in changedFiles, OR (for interface_resolved facts) one of the interfaces
+// it dispatches through just changed implementer set — everything else is
+// left completely alone, no DB write at all. This is the actual section
+// 2.2 payoff: StaleLiveFacts drives what gets touched instead of
+// recomputing and diffing the whole live set every commit. Pass nil (or
+// every file in the table) to force a full pass, e.g. for the first commit
+// of a repo where nothing is live yet.
+//
 // Must be called with the *sql.Tx from an in-flight ApplyDelta call — see
 // interval.go's and derivation.go's doc comments for why fact/derivation
 // writes never accept a bare *sql.DB.
-func ApplyFacts(ctx context.Context, tx *sql.Tx, repo string, seq int64, newFacts []FactWithDerivations) (Stats, error) {
+func ApplyFacts(ctx context.Context, tx *sql.Tx, repo string, seq int64, newFacts []FactWithDerivations, changedFiles map[string]bool) (Stats, error) {
 	var stats Stats
 
-	live, err := store.QueryLiveFacts(ctx, tx, repo)
-	if err != nil {
-		return stats, fmt.Errorf("query live facts: %w", err)
+	// Interface implementer sets are maintained regardless of scoping —
+	// this is cheap (one row per interface) and is how we find OUT which
+	// interfaces changed in the first place.
+	ifaceHashes := make(map[string]string)
+	for _, nf := range newFacts {
+		for _, d := range nf.Derivations {
+			if d.InputKind == store.InputKindInterface {
+				ifaceHashes[d.InputKey] = d.InputHash
+			}
+		}
 	}
-	liveByKey := make(map[string]store.Fact, len(live))
-	for _, f := range live {
-		liveByKey[naturalKey(repo, f)] = f
+	changedInterfaces := make(map[string]bool)
+	for iface, hash := range ifaceHashes {
+		changed, err := store.UpsertInterfaceImplementers(ctx, tx, repo, iface, hash, seq)
+		if err != nil {
+			return stats, fmt.Errorf("upsert interface_implementers for %s: %w", iface, err)
+		}
+		if changed {
+			changedInterfaces[iface] = true
+		}
+	}
+
+	// Close-candidates: live facts in a changed file, plus live facts
+	// anywhere whose recorded INTERFACE hash no longer matches (cross-file
+	// impact of a changed implementer set).
+	liveByKey := make(map[string]store.Fact)
+	if len(changedFiles) > 0 {
+		files := make([]string, 0, len(changedFiles))
+		for f := range changedFiles {
+			files = append(files, f)
+		}
+		rows, err := store.LiveFactsForFiles(ctx, tx, repo, files)
+		if err != nil {
+			return stats, fmt.Errorf("live facts for changed files: %w", err)
+		}
+		for _, f := range rows {
+			liveByKey[naturalKey(repo, f)] = f
+		}
+	}
+	for iface := range changedInterfaces {
+		rows, err := store.StaleLiveFacts(ctx, tx, repo, store.InputKindInterface, iface, ifaceHashes[iface])
+		if err != nil {
+			return stats, fmt.Errorf("stale live facts for %s: %w", iface, err)
+		}
+		for _, f := range rows {
+			liveByKey[naturalKey(repo, f)] = f
+		}
+	}
+
+	// Open-candidates: new facts whose own file changed, or that dispatch
+	// through a changed interface.
+	touched := func(nf FactWithDerivations) bool {
+		if changedFiles[nf.Fact.SourceFile] {
+			return true
+		}
+		for _, d := range nf.Derivations {
+			if d.InputKind == store.InputKindInterface && changedInterfaces[d.InputKey] {
+				return true
+			}
+		}
+		return false
 	}
 
 	seenKeys := make(map[string]bool, len(newFacts))
 
 	for _, nf := range newFacts {
+		if !touched(nf) {
+			continue
+		}
 		nf.Fact.Repo = repo
 		nf.Fact.ValidFrom = seq
 		key := naturalKey(repo, nf.Fact)
@@ -101,6 +168,26 @@ func ApplyFacts(ctx context.Context, tx *sql.Tx, repo string, seq int64, newFact
 	return stats, nil
 }
 
+// diffFileHashes returns the set of files that are new, removed, or whose
+// content hash changed between old (what's currently recorded live) and
+// new (what was just computed). For a fresh repo (old is empty), every
+// file in new comes back changed — which is correct, everything needs
+// opening.
+func diffFileHashes(old, new map[string]string) map[string]bool {
+	changed := make(map[string]bool)
+	for f, h := range new {
+		if oldH, ok := old[f]; !ok || oldH != h {
+			changed[f] = true
+		}
+	}
+	for f := range old {
+		if _, ok := new[f]; !ok {
+			changed[f] = true // file deleted since last commit
+		}
+	}
+	return changed
+}
+
 // IndexCommitFromRepo is the full pipeline for one commit: load packages,
 // run the poison-input gate (architecture.md section 3.2), and — only if
 // clean — compute and apply facts. On a poison commit, it records the skip
@@ -128,14 +215,20 @@ func IndexCommitFromRepo(
 
 	table := parser.BuildSymbolTable(pkgs, fset, repoRoot, modulePath)
 
-	facts, _, err := ComputeFacts(repoRoot, modulePath, table)
+	facts, newHashes, err := ComputeFacts(repoRoot, modulePath, table)
 	if err != nil {
 		return nil, fmt.Errorf("compute facts: %w", err)
 	}
 
+	oldHashes, err := store.LiveFileHashes(ctx, db.RawDB(), repo)
+	if err != nil {
+		return nil, fmt.Errorf("live file hashes: %w", err)
+	}
+	changedFiles := diffFileHashes(oldHashes, newHashes)
+
 	var stats Stats
 	err = db.ApplyDelta(ctx, repo, seq, fingerprint, func(ctx context.Context, tx *sql.Tx) error {
-		s, err := ApplyFacts(ctx, tx, repo, seq, facts)
+		s, err := ApplyFacts(ctx, tx, repo, seq, facts, changedFiles)
 		stats = s
 		return err
 	})

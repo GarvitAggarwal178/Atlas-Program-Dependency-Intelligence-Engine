@@ -8,3 +8,4 @@ One line per commit. Human-readable, no filler.
 - Add crash-consistency schema (commits/repo_state/skipped_commits) and ApplyDelta single-transaction watermark primitive, verified via SIGKILL injection.
 - Move v3.1 tables into a dedicated atlas Postgres schema to avoid colliding with v2's existing facts table.
 - Add internal/linearize (first-parent commit walk + rebase-detecting fingerprint) and the atlas.facts interval-based schema with OpenFact/CloseFact/QueryFactsAt.
+- Add derivation tracking (atlas.derivations, atlas.interface_implementers) with implementer-set hashing and the StaleLiveFacts invalidation query; section 2.2 soundness fixture passes end to end.

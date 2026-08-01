@@ -36,9 +36,59 @@ below for what's in flight.)
 | 2 | Freeze v2, tag it | **Done.** Tagged `v2-frozen` at the commit that added architecture.md + docs scaffolding. |
 | 3 | Crash consistency + poison-input gate | **Done.** See below. |
 | 4 | Interval store (facts, commits, linearization fingerprint) | **Done.** See below. |
-| 5 | Derivation tracking, implementer-set hashing | Not started |
+| 5 | Derivation tracking, implementer-set hashing | **Done.** See below. |
 | 6 | IMPLEMENTS probe | Not started |
 | 7+ | Everything else | Not started this session |
+
+### Step 5 detail (derivation tracking, implementer-set hashing) — done
+
+**`internal/derive` (pure logic, no DB):** `ImplementerSetHash` — sorted,
+deduplicated, SHA-256 over the qualified implementer type names. Also
+includes `MethodSetHash` (kept ONLY as the rejected v3 mechanism, so a test
+can demonstrate why it's wrong, not for any store code to call) and
+`FileStructuralHash`/`TypeMethodSetHash` for the other three
+`derivations.input_hash` kinds §5 names (FILE, TYPE), for vocabulary
+completeness — MODULE uses the version string directly, no hash function
+needed.
+
+**`TestSoundnessFix_MethodSetHashMissesNewImplementer_ImplementerSetHashCatchesIt`**
+reproduces §2.2's worked example directly: constructs the exact scenario
+(interface method set unchanged, implementer set changed) and proves
+`MethodSetHash` stays constant across it (the v3 bug, made concrete) while
+`ImplementerSetHash` changes (the fix).
+
+**`internal/store/schema_v5.go`:** `atlas.derivations` (references
+`atlas.facts(fact_id) ON DELETE CASCADE`) and `atlas.interface_implementers`
+— the maintained, interval-based relation §2.2 requires ("a first-class
+derived relation, not recomputed by scanning the program").
+
+**`internal/store/derivation.go`:**
+- `RecordDerivation`/`RecordDerivations` — tied to `*sql.Tx`, same
+  crash-consistency reasoning as `OpenFact`.
+- `StaleLiveFacts(ctx, q, repo, inputKind, inputKey, currentHash)` — THE
+  invalidation query: every live fact whose recorded hash for that input no
+  longer matches. This is the entire mechanism §2.2 promises — no
+  per-trigger-type rule, one query, reused for every input kind.
+- `UpsertInterfaceImplementers` — maintains the interval-based implementer-set
+  relation, reports `changed` so callers know whether to run
+  `StaleLiveFacts` at all.
+
+**`TestSection2_2Fixture`** (`internal/store/derivation_test.go`) is
+§9.1 fixture 3 ("add an implementer of an already-dispatched interface —
+this is the §2.2 bug — it must fail before the fix") run against the
+ACTUAL fix, end to end at the store level: opens a dispatch-site fact with
+a recorded `INTERFACE` derivation at the old implementer-set hash, adds a
+new implementer, and proves (a) `UpsertInterfaceImplementers` reports the
+change, (b) `StaleLiveFacts` correctly flags the dispatch fact and does
+**not** flag an unrelated fact, (c) a no-op update (same set) correctly
+reports `changed=false`, (d) once the stale fact is closed it drops out of
+`StaleLiveFacts`.
+
+**Not done as part of step 5:** this is still the primitive layer, not
+wired into the parser/callgraph pipeline — nothing yet calls
+`derive.ImplementerSetHash` from real parsed Go source, and there's no
+"index a real commit end-to-end through derivation tracking" loop. That
+wiring, plus the actual §8 IMPLEMENTS probe, is the next task.
 
 ### Step 4 detail (interval store) — done
 

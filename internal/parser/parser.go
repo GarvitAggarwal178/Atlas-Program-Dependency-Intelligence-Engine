@@ -38,13 +38,22 @@ import (
 	"github.com/yourorg/symex/internal/symboltable"
 )
 
-// ParseRepo loads every package under repoRoot using go/packages (module-aware),
-// type-checks them all together so cross-package Selections are populated,
-// and returns the aggregated RepoSymbolTable.
+// LoadPackages loads every package under repoRoot using go/packages
+// (module-aware), with the Need flags architecture.md section 6 requires,
+// and returns the raw *packages.Package slice plus the FileSet used to load
+// them.
+//
+// LoadPackages performs no filtering or gating. Callers that need the
+// poison-input hard gate (architecture.md section 3.2 — "assert every
+// loaded package has zero Errors and complete TypesInfo; any error means
+// refuse to index the commit") must call CheckPoison on the result and
+// honor it before deriving any facts. ParseRepo below does NOT call
+// CheckPoison — it is the pre-gate, warn-and-continue extraction path used
+// by the v2 engine and its tests, preserved as-is.
 //
 // repoRoot must be the directory containing go.mod.
-// modulePath must match the module directive in go.mod.
-func ParseRepo(repoRoot, modulePath string) (*symboltable.RepoSymbolTable, error) {
+func LoadPackages(repoRoot string) ([]*packages.Package, *token.FileSet, error) {
+	fset := token.NewFileSet()
 	cfg := &packages.Config{
 		Mode: packages.NeedName |
 			packages.NeedFiles |
@@ -55,7 +64,7 @@ func ParseRepo(repoRoot, modulePath string) (*symboltable.RepoSymbolTable, error
 			packages.NeedTypesInfo |
 			packages.NeedTypesSizes,
 		Dir:  repoRoot,
-		Fset: token.NewFileSet(),
+		Fset: fset,
 		// ParseFile with ParseComments so the canonicalizer can strip them.
 		ParseFile: func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
 			return parseFileWithComments(fset, filename, src)
@@ -65,7 +74,28 @@ func ParseRepo(repoRoot, modulePath string) (*symboltable.RepoSymbolTable, error
 	// "./..." loads all packages in the module rooted at cfg.Dir.
 	pkgs, err := packages.Load(cfg, "./...")
 	if err != nil {
-		return nil, fmt.Errorf("packages.Load: %w", err)
+		return nil, nil, fmt.Errorf("packages.Load: %w", err)
+	}
+	return pkgs, fset, nil
+}
+
+// ParseRepo loads every package under repoRoot using go/packages (module-aware),
+// type-checks them all together so cross-package Selections are populated,
+// and returns the aggregated RepoSymbolTable.
+//
+// ParseRepo does NOT run the poison-input gate (architecture.md section
+// 3.2) — it logs per-package load errors and extracts whatever it can from
+// partially-typed packages, which is the v2 engine's existing (and known
+// unsound, per section 3.2) behavior. New code that must not derive facts
+// from a broken commit should call LoadPackages + CheckPoison directly
+// instead of ParseRepo.
+//
+// repoRoot must be the directory containing go.mod.
+// modulePath must match the module directive in go.mod.
+func ParseRepo(repoRoot, modulePath string) (*symboltable.RepoSymbolTable, error) {
+	pkgs, fset, err := LoadPackages(repoRoot)
+	if err != nil {
+		return nil, err
 	}
 
 	result := &symboltable.RepoSymbolTable{
@@ -74,12 +104,14 @@ func ParseRepo(repoRoot, modulePath string) (*symboltable.RepoSymbolTable, error
 
 	for _, pkg := range pkgs {
 		// Log load errors per-package but continue — partial type info is
-		// still useful for packages that do load cleanly.
+		// still useful for packages that do load cleanly. See the doc
+		// comment above: this is the known-unsound path CheckPoison exists
+		// to replace for callers that need soundness.
 		for _, e := range pkg.Errors {
 			fmt.Fprintf(os.Stderr, "warn: %s: %v\n", pkg.PkgPath, e)
 		}
 
-		files, err := extractPackageSymbols(pkg, repoRoot, cfg.Fset)
+		files, err := extractPackageSymbols(pkg, repoRoot, fset)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warn: extracting %s: %v\n", pkg.PkgPath, err)
 			continue

@@ -89,6 +89,12 @@ func Open(dsn string) (*DB, error) {
 // Close releases the underlying connection pool.
 func (s *DB) Close() error { return s.db.Close() }
 
+// RawDB exposes the underlying *sql.DB for tests and callers that need to
+// run ad hoc queries not covered by a domain-typed method (e.g. integration
+// tests asserting on raw row counts). Not for use in normal application
+// code paths — prefer adding a domain-typed method instead.
+func (s *DB) RawDB() *sql.DB { return s.db }
+
 // SetModulePath records the main repo's own Go module path, used to populate
 // facts.source_module for facts inserted via InsertEdges. Call this once,
 // after resolving the module path (e.g. via internal/modpath), before any

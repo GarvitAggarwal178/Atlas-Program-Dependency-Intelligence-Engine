@@ -61,7 +61,7 @@ cmd/
 internal/
   symboltable/            — pure data model for stage-1 output (no I/O)
   canonicalize/           — structural hash for trivial-change detection
-  parser/                 — go/parser + go/types extraction (v2 frontend; see FLAGGED re go/packages migration)
+  parser/                 — go/packages-based extraction (already matches §6); poison-input gate (§3.2) added on top
   callgraph/              — CHA-style edge builder + interface expansion
   differ/                 — git diff → changed line ranges → changed symbols
   classifier/             — trivial / signature_change / logic_change classification

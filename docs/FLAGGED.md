@@ -32,36 +32,29 @@ new name is "Atlas (formerly symex)" as a hedge.
 
 ---
 
-## [2026-08-01] `go/packages` frontend migration (§6) not yet started
+## [2026-08-01] ~~`go/packages` frontend migration~~ — RESOLVED, was a misread
 
-architecture.md §6 is explicit: *"Not hand-rolled `go/parser` + manual
-`go/types.Config`... Always check `pkg.Errors`."* The current
-`internal/parser` package (v2) uses exactly the hand-rolled approach §6
-rejects — standard-library-only `go/parser`/`go/types`, no `go/packages`,
-no module/build-tag/vendoring resolution.
+**Correction, same day:** The README (which documents "Stage 1" as
+`go/parser`+`go/types`, standard library only) is stale relative to the
+actual code. `internal/parser/parser.go` already uses
+`golang.org/x/tools/go/packages` with `NeedSyntax|NeedTypes|NeedTypesInfo|
+NeedImports|...`, exactly as §6 requires — this was verified by reading the
+file directly, not the README. §6 is already satisfied at the frontend
+level.
 
-**Why it's blocking:** This is large, load-bearing surgery — it changes how
-every file is loaded and therefore touches parser, canonicalize (bridges
-into parser), callgraph, and the new poison-input gate (§3.2) which
-requires `go/packages`' `pkg.Errors`/`TypesInfo` semantics specifically
-(the hand-rolled frontend doesn't have an equivalent "the whole package
-failed to type-check" signal in the same shape). It is also explicitly
-**not** part of build-order steps 3–6 (crash consistency, interval store,
-derivation tracking, IMPLEMENTS probe), which can be built against the
-existing frontend's output shape (`RepoSymbolTable`) without waiting on this.
+What is genuinely missing: `ParseRepo` (parser.go:75-90) iterates
+`pkg.Errors` and only **logs** them (`fmt.Fprintf(os.Stderr, ...)`) before
+continuing to extract facts from that package's (possibly incomplete)
+`TypesInfo`. That is exactly the §3.2 poison-input failure mode —
+"Derive facts from a partially-typed package and you write wrong facts
+with valid derivations." This is not a frontend gap, it's the missing hard
+gate itself, and it's what build-order step 3's poison-input gate fixes
+directly against the existing `go/packages`-based frontend, with no
+migration needed.
 
-**What's needed:** Confirm this is in scope for this pass (it's real,
-multi-day work per §16's "conceptual fraction doesn't compress" note) vs.
-deferred to a later session. Interim poison-input gate (§3.2) implemented
-now checks `go/parser` and `go/types.Config.Error` callback errors as the
-best available proxy for "this commit doesn't build" — documented as an
-approximation in docs/DECISIONS.md, not the real `pkg.Errors` gate §6/§3.2
-actually specify.
-
-**Current call:** Proceeding with steps 3–6 against the existing
-`go/parser`+`go/types` frontend, with the poison-input gate implemented as
-an approximation (see docs/DECISIONS.md). Flagging the full `go/packages`
-migration as separate, larger, not-yet-started work.
+No open question here anymore — removing this as a blocker. Leaving the
+entry (struck through) so the correction is visible rather than silently
+disappearing.
 
 ---
 
@@ -105,6 +98,42 @@ deleted, or left alone.
 
 **Current call:** Left untouched. Not referenced by any new docs/schema
 work in this session.
+
+---
+
+## [2026-08-01] `test/test/*` directory — deliberately gitignored, stale duplicate of `internal/*`
+
+**Update:** `.gitignore` has `/testdata` (since the first commit) and
+`/test` (added in the most recent v2 commit, "fixed the bug in incremental
+commit changes"). So `test/test/` isn't accidental clutter — the previous
+author deliberately excluded it from git, in the same commit that fixed
+the incremental engine bug. Its content (`test/test/incremental/engine.go`
+still says `DELETE FROM call_edges` where `internal/incremental/engine.go`
+has since moved to the generic `facts` table) reads like a manual
+copy-scratch-and-compare workspace used while developing that fix, left
+behind locally. Consistent with `/testdata` also being gitignored from
+commit 1 — `testdata/fixture` (used by every parser/callgraph test) is
+itself untracked, so this repo has apparently never actually shipped its
+own test fixtures through git; they're expected to already exist in the
+working tree. (My new `testdata/broken_fixture`, added for the
+poison-input gate tests, is untracked for the same reason — see
+docs/DECISIONS.md.)
+
+**Why it's blocking:** Still not clearly safe to delete — "the previous
+author's scratch workspace" is a stronger guess than before, but still a
+guess. Also worth a decision independent of deletion: should `testdata/`
+actually be gitignored? As-is, a fresh clone of this repo cannot run its
+own test suite (`internal/parser`, `internal/callgraph`, etc. all depend on
+`testdata/fixture` existing) — that seems unintentional, not a design
+choice, and may be worth fixing (un-ignore `testdata/`, or add a
+fixture-generation script) independent of what happens to `test/test/`.
+
+**What's needed:** Confirm whether `test/test/` can be deleted, and
+separately, confirm whether `/testdata` should be un-ignored so the test
+suite is actually reproducible from a clean clone.
+
+**Current call:** Left both untouched. New testdata (`broken_fixture`)
+follows the existing (gitignored) convention rather than fighting it.
 
 ---
 

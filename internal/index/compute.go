@@ -42,7 +42,10 @@ type FactWithDerivations struct {
 // content for FILE input hashing — table must already reflect repoRoot's
 // current on-disk state (i.e. the caller has checked out the right commit
 // before parsing).
-func ComputeFacts(repoRoot, modulePath string, table *symboltable.RepoSymbolTable) ([]FactWithDerivations, error) {
+// Returns the facts plus the file->hash map it computed along the way, so
+// callers can diff that against what's currently recorded (LiveFileHashes)
+// to figure out which files actually changed.
+func ComputeFacts(repoRoot, modulePath string, table *symboltable.RepoSymbolTable) ([]FactWithDerivations, map[string]string, error) {
 	fileHashes := make(map[string]string)
 	getFileHash := func(relPath string) (string, error) {
 		if h, ok := fileHashes[relPath]; ok {
@@ -75,7 +78,7 @@ func ComputeFacts(repoRoot, modulePath string, table *symboltable.RepoSymbolTabl
 	for _, file := range table.Files {
 		fileHash, err := getFileHash(file.FilePath)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		for _, ref := range file.References {
@@ -145,7 +148,7 @@ func ComputeFacts(repoRoot, modulePath string, table *symboltable.RepoSymbolTabl
 		}
 	}
 
-	return result, nil
+	return result, fileHashes, nil
 }
 
 // implementersOf returns the qualified names of every concrete type in

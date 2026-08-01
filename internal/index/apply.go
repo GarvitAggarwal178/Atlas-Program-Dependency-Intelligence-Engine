@@ -128,7 +128,7 @@ func IndexCommitFromRepo(
 
 	table := parser.BuildSymbolTable(pkgs, fset, repoRoot, modulePath)
 
-	facts, err := ComputeFacts(repoRoot, modulePath, table)
+	facts, _, err := ComputeFacts(repoRoot, modulePath, table)
 	if err != nil {
 		return nil, fmt.Errorf("compute facts: %w", err)
 	}

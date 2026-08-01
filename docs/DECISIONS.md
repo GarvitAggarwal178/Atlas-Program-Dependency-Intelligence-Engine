@@ -167,6 +167,60 @@ inspection. `internal/parser/poison_test.go`'s
 match, with the old name and reasoning kept in the doc comment so this
 isn't silently rewritten history.
 
+## [2026-08-01] Fixed: cross-package interface satisfaction was never detected at all
+
+**This is a significant one, found via fixture 5, not by inspection.**
+
+`internal/parser`'s interface-implementer detection (`collectPackageInterfacesFromPkg`
+/ `collectPackageInterfaces`) only ever scanned the CURRENT package's own
+`pkg.Syntax` for interface declarations, then checked every concrete type
+in that same package against only those same-package interfaces. A
+concrete type in package A implementing an interface declared in package B
+was **never detected** — `types.Implements` was simply never called
+against it. This isn't a rare edge case: `io.Writer`, `http.Handler`,
+`sort.Interface`, `fmt.Stringer`, `error` — cross-package interface
+satisfaction is the NORMAL shape of idiomatic Go, arguably more common
+than same-package. Every `interface_resolved` edge computed against a
+cross-package interface was silently falling back to
+`ComputeFacts`'s "no known implementers" raw-descriptor edge instead of
+resolving to real concrete targets — undercutting the actual precision of
+the whole system for a very common pattern, without any visible error.
+
+**How it was found:** fixture 5 ("move a type across a package boundary")
+failed on its very first assertion — the dispatch edge wasn't even present
+at seq=0, before anything moved. Investigated rather than adjusting the
+test to match: traced it to `collectPackageInterfacesFromPkg` and
+confirmed by reading the code (not guessing) that it only ever receives
+`pkg.Syntax`, one package's files.
+
+**The old README's claim was wrong about the actual code:** it says
+cross-package satisfaction "works when dependencies are available" — that
+describes intent, not what the code did. Same category of stale-doc-vs-
+real-code gap as the earlier `go/packages` correction this session.
+
+**Fix:** `collectAllInterfaces(pkgs []*packages.Package)` replaces the
+per-package collector, building one map keyed by FULLY-QUALIFIED interface
+name across every loaded package, computed once in `BuildSymbolTable`
+before the per-package extraction loop (not recomputed per package — it's
+the same global map for all of them). `extractDefinedSymbols` was also
+fixed at the same time to stop prepending the CONCRETE type's own import
+path onto the interface name (`importPath+"."+ifaceName"`) — that was
+only ever correct by coincidence when interface and implementer shared a
+package; the map is now keyed by the interface's OWN qualified name, from
+its own declaring package.
+
+**Blast radius:** this is a shared-frontend fix — both v2 (`ParseRepo`)
+and v3.1 (`BuildSymbolTable`) read the same `ImplementedInterfaces` field,
+so both benefit uniformly. This does NOT touch v2's invalidation logic
+(`internal/incremental`, still frozen/untouched) — only fact-extraction
+accuracy improved, which is a legitimate shared-frontend correctness fix,
+not a v2-specific behavior change. Full test suite reran clean afterward,
+confirming no existing fixture (`testdata/fixture`'s `billing.Ledger`
+case is same-package, so it never exercised this path either way) broke.
+Added `TestCrossPackageInterfaceSatisfaction` as a direct, minimal
+regression test right next to the fix, not just relying on fixture 5 to
+catch a regression indirectly.
+
 ## [2026-08-01] SIGKILL injection test trial count
 
 **Maps to:** architecture.md §3.1 ("≥500 trials, asserting recovery to a

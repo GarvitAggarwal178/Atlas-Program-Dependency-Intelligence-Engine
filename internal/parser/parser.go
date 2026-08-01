@@ -122,8 +122,16 @@ func BuildSymbolTable(pkgs []*packages.Package, fset *token.FileSet, repoRoot, m
 		ModulePath: modulePath,
 	}
 
+	// Collect every interface across EVERY loaded package once, up front.
+	// This is what makes cross-package interface satisfaction detectable —
+	// a concrete type in package A implementing an interface declared in
+	// package B, which is one of the most common Go patterns (io.Writer,
+	// http.Handler, sort.Interface, ...) and was previously invisible: see
+	// the fix note on allInterfaces below.
+	allInterfaces := collectAllInterfaces(pkgs)
+
 	for _, pkg := range pkgs {
-		files, err := extractPackageSymbols(pkg, repoRoot, fset)
+		files, err := extractPackageSymbols(pkg, repoRoot, fset, allInterfaces)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warn: extracting %s: %v\n", pkg.PkgPath, err)
 			continue
@@ -151,6 +159,7 @@ func extractPackageSymbols(
 	pkg *packages.Package,
 	repoRoot string,
 	fset *token.FileSet,
+	allInterfaces map[string]*types.Interface,
 ) ([]symboltable.FileSymbolTable, error) {
 	if pkg.TypesInfo == nil {
 		// Package failed to type-check entirely; skip.
@@ -159,10 +168,6 @@ func extractPackageSymbols(
 
 	info := pkg.TypesInfo
 	importPath := pkg.PkgPath
-
-	// Build the per-package interface map for implementor detection.
-	// We need to do this across all files in the package.
-	pkgInterfaces := collectPackageInterfacesFromPkg(pkg, info)
 
 	var result []symboltable.FileSymbolTable
 
@@ -188,7 +193,7 @@ func extractPackageSymbols(
 			ImportPath: importPath,
 		}
 
-		fst.Defined = extractDefinedSymbols(f, fset, info, pkgName, importPath, pkgInterfaces)
+		fst.Defined = extractDefinedSymbols(f, fset, info, pkgName, importPath, allInterfaces)
 		fst.References = extractCallReferences(f, fset, info, pkgName, importPath)
 
 		result = append(result, fst)
@@ -197,39 +202,53 @@ func extractPackageSymbols(
 	return result, nil
 }
 
-// collectPackageInterfacesFromPkg builds the interface name → *types.Interface
-// map from a fully type-checked *packages.Package.
-func collectPackageInterfacesFromPkg(
-	pkg *packages.Package,
-	info *types.Info,
-) map[string]*types.Interface {
-	return collectPackageInterfaces(pkg.Syntax, info)
-}
-
-// collectPackageInterfaces builds a map from interface type name to the
-// *types.Interface value for all interfaces declared in the package.
-func collectPackageInterfaces(
-	files []*ast.File,
-	info *types.Info,
-) map[string]*types.Interface {
+// collectAllInterfaces builds a map from FULLY-QUALIFIED interface name
+// ("import/path.IfaceName") to its *types.Interface, across EVERY loaded
+// package, not just one.
+//
+// Fix, found via architecture.md section 9.1's fixture 5 ("move a type
+// across a package boundary") failing: the previous version of this
+// function (collectPackageInterfacesFromPkg / collectPackageInterfaces)
+// only scanned the CURRENT package's own pkg.Syntax, so a concrete type in
+// package A implementing an interface declared in package B was never
+// detected — types.Implements was only ever checked against
+// same-package interfaces. That's not a rare edge case: io.Writer,
+// http.Handler, sort.Interface, fmt.Stringer, error — cross-package
+// interface satisfaction is the NORMAL case in idiomatic Go, arguably more
+// common than same-package. Every interface_resolved edge computed
+// against a cross-package interface was silently falling back to the
+// "no known implementers" raw-descriptor edge (internal/index.ComputeFacts's
+// documented fallback) instead of resolving to real concrete targets.
+//
+// The old README already claimed this worked ("this works when
+// dependencies are available") — that claim was wrong about the actual
+// code, exactly the kind of stale-doc-vs-real-code gap already found once
+// this session (see docs/DECISIONS.md's go/packages correction).
+func collectAllInterfaces(pkgs []*packages.Package) map[string]*types.Interface {
 	result := make(map[string]*types.Interface)
-	for _, f := range files {
-		for _, decl := range f.Decls {
-			gen, ok := decl.(*ast.GenDecl)
-			if !ok {
-				continue
-			}
-			for _, spec := range gen.Specs {
-				ts, ok := spec.(*ast.TypeSpec)
+	for _, pkg := range pkgs {
+		if pkg.TypesInfo == nil {
+			continue
+		}
+		importPath := pkg.PkgPath
+		for _, f := range pkg.Syntax {
+			for _, decl := range f.Decls {
+				gen, ok := decl.(*ast.GenDecl)
 				if !ok {
 					continue
 				}
-				if _, ok := ts.Type.(*ast.InterfaceType); !ok {
-					continue
-				}
-				if obj, ok := info.Defs[ts.Name]; ok && obj != nil {
-					if iface, ok := obj.Type().Underlying().(*types.Interface); ok {
-						result[ts.Name.Name] = iface
+				for _, spec := range gen.Specs {
+					ts, ok := spec.(*ast.TypeSpec)
+					if !ok {
+						continue
+					}
+					if _, ok := ts.Type.(*ast.InterfaceType); !ok {
+						continue
+					}
+					if obj, ok := pkg.TypesInfo.Defs[ts.Name]; ok && obj != nil {
+						if iface, ok := obj.Type().Underlying().(*types.Interface); ok {
+							result[importPath+"."+ts.Name.Name] = iface
+						}
 					}
 				}
 			}
@@ -244,7 +263,7 @@ func extractDefinedSymbols(
 	fset *token.FileSet,
 	info *types.Info,
 	pkgName, importPath string,
-	pkgInterfaces map[string]*types.Interface,
+	allInterfaces map[string]*types.Interface,
 ) []symboltable.DefinedSymbol {
 	var syms []symboltable.DefinedSymbol
 
@@ -281,11 +300,15 @@ func extractDefinedSymbols(
 					var implIfaces []string
 					if obj, ok := info.Defs[ts.Name]; ok && obj != nil {
 						concreteType := obj.Type()
-						// Check both T and *T against every interface in the package.
-						for ifaceName, iface := range pkgInterfaces {
+						// Check both T and *T against every interface in the
+						// WHOLE program (allInterfaces is already keyed by
+						// fully-qualified name, from each interface's OWN
+						// declaring package — do not prepend this type's
+						// importPath here, that was the cross-package bug).
+						for qualifiedIfaceName, iface := range allInterfaces {
 							if types.Implements(concreteType, iface) ||
 								types.Implements(types.NewPointer(concreteType), iface) {
-								implIfaces = append(implIfaces, importPath+"."+ifaceName)
+								implIfaces = append(implIfaces, qualifiedIfaceName)
 							}
 						}
 					}

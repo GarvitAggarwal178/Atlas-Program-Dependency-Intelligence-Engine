@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+
+	"github.com/lib/pq"
 )
 
 // queryer is satisfied by both *sql.DB and *sql.Tx. Read paths (QueryFactsAt,
@@ -112,6 +114,28 @@ func QueryFactsAt(ctx context.Context, q queryer, repo string, seq int64) ([]Fac
 	`, repo, seq)
 	if err != nil {
 		return nil, fmt.Errorf("query facts at seq=%d: %w", seq, err)
+	}
+	defer rows.Close()
+	return scanFacts(rows)
+}
+
+// LiveFactsForFiles returns every currently-live fact whose source_file is
+// in files. Used by selective invalidation to find exactly which live
+// facts might need closing when those specific files changed, without
+// touching anything else.
+func LiveFactsForFiles(ctx context.Context, q queryer, repo string, files []string) ([]Fact, error) {
+	if len(files) == 0 {
+		return nil, nil
+	}
+	rows, err := q.QueryContext(ctx, `
+		SELECT fact_id, repo, kind, source_symbol, target_symbol, provenance, call_site,
+		       source_file, source_module, source_module_version, support_count,
+		       valid_from, valid_to
+		FROM atlas.facts
+		WHERE repo = $1 AND valid_to IS NULL AND source_file = ANY($2)
+	`, repo, pq.Array(files))
+	if err != nil {
+		return nil, fmt.Errorf("live facts for files: %w", err)
 	}
 	defer rows.Close()
 	return scanFacts(rows)

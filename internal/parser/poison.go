@@ -54,12 +54,22 @@ type PoisonResult struct {
 // honored, before any fact derivation for code paths that need soundness
 // (i.e. everything except the legacy ParseRepo path — see its doc comment).
 func CheckPoison(pkgs []*packages.Package) PoisonResult {
+	// Zero packages is NOT automatically poison. Correction made after a
+	// real false positive: a commit that adds only go.mod, with no .go
+	// files yet, is a completely ordinary early-repo state — "./..." then
+	// legitimately matches nothing, with no error and no per-package
+	// Errors/incomplete-TypesInfo signal at all. Treating that as a hard
+	// failure inflated the skip rate with commits that were never broken,
+	// which section 3.2 explicitly says must not happen ("the skip rate is
+	// part of every reported result" — it should reflect real build
+	// failures, not empty repos). A genuine module-resolution failure
+	// either surfaces as an error from packages.Load itself (returned
+	// separately by LoadPackages, upstream of this function) or as
+	// per-package Errors/incomplete TypesInfo on whatever DID load — both
+	// still caught below. Zero packages with no such signal is just
+	// "nothing to derive facts from," which is Clean.
 	if len(pkgs) == 0 {
-		return PoisonResult{
-			Clean:  false,
-			Reason: ReasonModuleUnavailable,
-			Detail: "go/packages loaded zero packages for \"./...\" — module likely unresolvable at this commit",
-		}
+		return PoisonResult{Clean: true}
 	}
 
 	var errStrs []string

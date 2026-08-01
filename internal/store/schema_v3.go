@@ -161,6 +161,29 @@ func (s *DB) RecordSkippedCommit(ctx context.Context, sc SkippedCommit) error {
 	return nil
 }
 
+// ListCommits returns every row in atlas.commits for repo, ordered by seq
+// ascending (oldest first) — the order the indexer must apply them in.
+func (s *DB) ListCommits(ctx context.Context, repo string) ([]Commit, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT seq, commit_hash, COALESCE(parent_hash, '')
+		FROM atlas.commits WHERE repo = $1 ORDER BY seq ASC
+	`, repo)
+	if err != nil {
+		return nil, fmt.Errorf("list commits: %w", err)
+	}
+	defer rows.Close()
+
+	var result []Commit
+	for rows.Next() {
+		c := Commit{Repo: repo}
+		if err := rows.Scan(&c.Seq, &c.CommitHash, &c.ParentHash); err != nil {
+			return nil, fmt.Errorf("scan commit: %w", err)
+		}
+		result = append(result, c)
+	}
+	return result, rows.Err()
+}
+
 // CommitCount returns the number of rows in atlas.commits for repo.
 func (s *DB) CommitCount(ctx context.Context, repo string) (int, error) {
 	var n int

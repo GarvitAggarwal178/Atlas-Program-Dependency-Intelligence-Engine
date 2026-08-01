@@ -131,6 +131,42 @@ runs, unlike most Go unit tests — collisions here look like product bugs
 (a CHECK constraint really did fire) but are actually a fixture problem.
 Any new integration test added later must follow the same convention.
 
+## [2026-08-01] CheckPoison: zero loaded packages is Clean, not poison
+
+**Maps to:** architecture.md section 3.2, correcting an earlier decision
+in this same file.
+
+**What happened:** `TestRunIndexer_IndexesRealCommitHistory` builds a real
+3-file-history repo whose FIRST commit adds only `go.mod`, no `.go` files
+yet (an entirely ordinary way a repo's history starts). Running the real
+indexer against it reported that commit as skipped/poison — `CheckPoison`
+originally treated `len(pkgs) == 0` as `ReasonModuleUnavailable`. That was
+wrong: an empty `go.mod`-only commit legitimately has zero packages under
+`"./..."`, with no error and no per-package `Errors`/incomplete-`TypesInfo`
+signal at all. Section 3.2's skip rate is supposed to measure real build
+failures ("the skip rate is part of every reported result"); counting
+ordinary empty-repo commits as skips would inflate it with noise.
+
+**Decision:** `CheckPoison(nil)` / `CheckPoison([])` now returns
+`Clean: true`. A genuine module-resolution failure is still caught two
+other ways: (a) `packages.Load` returning a non-nil error, which
+`LoadPackages` already surfaces separately, upstream of `CheckPoison`
+entirely; (b) whatever packages DID load having `Errors` or nil
+`TypesInfo`, still checked exactly as before. Only the specific case of
+"loaded successfully, matched nothing, no error signal anywhere" flipped
+from poison to clean.
+
+**Why recorded as a correction rather than silently fixed:** this reverses
+this file's own earlier stated design bullet (buried in the original
+"Poison-input gate" decision entry) without a second thought otherwise —
+worth being visible that the FIRST version of this gate was too aggressive,
+caught by an actual end-to-end test against real history, not by
+inspection. `internal/parser/poison_test.go`'s
+`TestCheckPoison_NoPackagesLoadedIsCaught` was renamed to
+`TestCheckPoison_NoPackagesLoadedIsClean` and its assertion flipped to
+match, with the old name and reasoning kept in the doc comment so this
+isn't silently rewritten history.
+
 ## [2026-08-01] SIGKILL injection test trial count
 
 **Maps to:** architecture.md §3.1 ("≥500 trials, asserting recovery to a

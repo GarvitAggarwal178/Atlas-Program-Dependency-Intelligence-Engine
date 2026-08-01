@@ -64,17 +64,22 @@ func TestCheckPoison_TypeErrorIsCaught(t *testing.T) {
 	}
 }
 
-// TestCheckPoison_NoPackagesLoadedIsCaught covers the case where
-// packages.Load returns zero packages for "./..." — e.g. an unresolvable
-// module. This must not be silently treated as "nothing to index" and
-// silently pass the gate as vacuously clean.
-func TestCheckPoison_NoPackagesLoadedIsCaught(t *testing.T) {
+// TestCheckPoison_NoPackagesLoadedIsClean covers the case where
+// packages.Load returns zero packages for "./..." with no error and no
+// per-package Errors — the ordinary shape of an early-repo commit that
+// only has go.mod, no .go files yet. This was originally (wrongly) treated
+// as poison; corrected after RunIndexer's end-to-end test against a real
+// multi-commit repo hit exactly this case on its very first (go.mod-only)
+// commit and got spuriously skipped. See docs/DECISIONS.md. A genuine
+// module-resolution failure is still caught: it surfaces either as an
+// error from packages.Load itself (LoadPackages returns that separately,
+// upstream of CheckPoison) or as per-package Errors/incomplete TypesInfo
+// on whatever DID load, both still tested below.
+func TestCheckPoison_NoPackagesLoadedIsClean(t *testing.T) {
 	result := parser.CheckPoison(nil)
-	if result.Clean {
-		t.Fatal("expected zero packages to be caught by the poison gate, got Clean=true")
-	}
-	if result.Reason != parser.ReasonModuleUnavailable {
-		t.Errorf("expected reason=%q, got %q", parser.ReasonModuleUnavailable, result.Reason)
+	if !result.Clean {
+		t.Fatalf("expected zero packages with no error signal to be Clean (an empty repo, not a broken one), got Clean=false reason=%q detail=%q",
+			result.Reason, result.Detail)
 	}
 }
 

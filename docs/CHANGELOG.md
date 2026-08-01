@@ -12,3 +12,5 @@ One line per commit. Human-readable, no filler.
 - Add and PASS the section 8 IMPLEMENTS probe: a new fact kind requires zero new invalidation code, confirmed by diff, not just argument.
 - Add SyncCommits: populates atlas.commits from a fresh linearize.Walk and refuses on a detected history rewrite (real end-to-end rebase-refusal test, not just unit-level).
 - Add internal/index (ComputeFacts/ApplyFacts/IndexCommitFromRepo): the real parser-to-interval-store pipeline, with an end-to-end section 2.2 fixture run against actual parsed Go source instead of hand-built facts, and the poison gate wired in for real.
+- Add store.ListCommits and index.RunIndexer: drives IndexCommitFromRepo across a real multi-commit git history via real checkouts.
+- Fix CheckPoison: zero loaded packages (e.g. a go.mod-only commit) is Clean, not poison — found via RunIndexer's end-to-end test against real history.

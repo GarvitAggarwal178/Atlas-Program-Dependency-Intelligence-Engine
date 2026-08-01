@@ -204,13 +204,47 @@ constraint correctly, for the wrong underlying reason. Investigated via
 direct `psql` inspection before concluding it was a fixture bug, fixed,
 and reran twice back-to-back to confirm.
 
-**Still not done:** this is a full-rebuild-and-diff pipeline, not a
-backward-validated incremental one (§2.3/step 10 — skipping re-parsing
-unchanged files — is still not built). It also doesn't yet drive from
-`SyncCommits`'s walked commit list automatically (no "for each
-un-applied seq, checkout that commit and call
-`IndexCommitFromRepo`" loop) — that loop plus real git checkouts is what
-build-order step 7 (measure against frozen v2) actually needs next.
+**Still not done at that point:** driving from `SyncCommits`'s walked
+commit list automatically with real git checkouts per seq. **Update: built
+next — see immediately below.**
+
+### Post-step-6, part 3: RunIndexer — real multi-commit git-driven indexing
+
+`store.ListCommits` (ascending by seq) plus `internal/index.RunIndexer`:
+given a real repo directory and branch, calls `SyncCommits` (populates
+`atlas.commits`, verifies the linearization fingerprint), then for every
+commit at or after the resume point, checks out that commit for real
+(`git checkout --detach <sha>`) and runs `IndexCommitFromRepo` against it,
+restoring the original `HEAD` afterward (mirroring how v2's
+`internal/incremental` harness already behaves).
+
+**`TestRunIndexer_IndexesRealCommitHistory`** builds a real 4-commit repo
+(go.mod, then three successive versions of `main.go` each adding one more
+function and one more direct-call edge) and runs the full pipeline end to
+end: real git checkouts, parsing, fact derivation, all four commits
+landing correctly, final live-fact set matching the expected call graph
+exactly, and a rerun with no new commits being a genuine no-op (0 commits
+re-indexed) — proving `ResumeFromSeq` correctly prevents redundant
+re-application. Reran twice back-to-back to confirm robustness.
+
+**A second real bug was found and fixed, this time a genuine design bug in
+`CheckPoison` itself (not a test artifact):** the very first commit in
+that 4-commit history (go.mod only, no `.go` files yet — an entirely
+normal way for a repo's history to start) was being flagged as poison,
+because `CheckPoison` originally treated "zero packages loaded" as
+`module_unavailable`. That conflated "genuinely broken" with "genuinely
+empty," inflating the skip-rate metric section 3.2 says must reflect real
+build failures. Fixed: zero packages with no error signal is now `Clean`;
+a real resolution failure is still caught via `LoadPackages`'s own error
+return or via `Errors`/incomplete `TypesInfo` on whatever DID load. Full
+writeup in docs/DECISIONS.md, including why this is recorded as a visible
+correction rather than a silent fix.
+
+**Still not done:** `RunIndexer` gives the ability to index a real repo's
+full history end to end, which is what build-order step 7 needs — but
+step 7 itself (comparing invalidation precision against the frozen v2
+differential harness, per §10.1's methodology, including the I10 soundness
+assertion) hasn't been run yet. Natural next task.
 
 ### Step 4 detail (interval store) — done
 

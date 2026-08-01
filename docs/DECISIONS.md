@@ -221,6 +221,61 @@ Added `TestCrossPackageInterfaceSatisfaction` as a direct, minimal
 regression test right next to the fix, not just relying on fixture 5 to
 catch a regression indirectly.
 
+## [2026-08-01] Real incremental DRed (§4.3), and how it was validated before trusting it
+
+**Maps to:** architecture.md section 4.3's actual mechanism — over-delete,
+rederive, insert — replacing the full-BFS-recompute reachability
+maintenance that was built first (deliberately, as a correctness baseline).
+
+**Why a naive translation of the three phases isn't actually incremental,
+and had to be caught before writing the "real" version:** the first
+instinct is "phase 2/3 = BFS from (old reachable minus dead) over the new
+edges." That is NOT incremental — a multi-source BFS costs the same
+O(V+E) as a single-source one, so it would re-touch the entire reachable
+region every commit, identical cost to `Reachable`'s full recompute, just
+with extra bookkeeping. The actual efficiency claim required a sharper
+argument: a node NOT marked dead by phase 1's pessimistic downstream
+propagation is provably still reachable via a path that never touched a
+removed edge — it can be ACCEPTED without re-derivation, not re-walked.
+Phase 2 (rederive) is then a fixpoint bounded by `|dead|` (does a dead node
+have some other live incoming edge from something confirmed?), and phase 3
+(insert) seeds only from targets of genuinely new edges, not the whole
+confirmed set. See `internal/reach/incremental.go`'s doc comment for the
+full argument — it's written there because it's the kind of thing you need
+to be able to reconstruct on a whiteboard, not just cite.
+
+**Validation, in order, before trusting it for anything:**
+1. The section 4.4 fixture (self-supporting cycle, sole external edge
+   deleted) — ported directly, passes.
+2. A differential fuzz test comparing `IncrementalUpdate` against
+   `Reachable` (the already-proven-correct full recompute) across ~650
+   random graphs (5 density/entry-count profiles) × ~30 sequential
+   mutations each — **~19,500 comparisons**, with the incremental result
+   fed FORWARD as the next delta's starting point rather than reset to
+   ground truth each time. That last detail matters: resetting to ground
+   truth every iteration would only test single-delta correctness and
+   could hide errors that compound across a sequence, which is the actual
+   production usage pattern.
+3. Five hand-picked degenerate cases a fuzzer might rarely hit — including
+   a "diamond" (two independent paths to the same node, only one broken)
+   that specifically exercises phase 2 recovering a node phase 1
+   pessimistically killed via propagation. Manually hand-traced this case
+   before trusting the test's own pass/fail, not just relying on the
+   assertion.
+4. Only after 1-3 passed clean: wired into the real store
+   (`MaintainReachabilityIncremental`), and ran a real 5-commit sequence
+   of actual Go source (including the fixture 8 scenario, a brand-new
+   node appearing, and an interface-dispatch edge shape) through BOTH the
+   full-recompute path and the incremental path on separate repo
+   namespaces, diffing `atlas.reachable_symbols` after every single
+   commit — not just at the end.
+
+**Both `MaintainReachability` (full recompute) and
+`MaintainReachabilityIncremental` are kept**, not just the new one — the
+full recompute stays as the simple reference implementation and the
+target of the differential test, exactly analogous to keeping v2 as a
+frozen oracle rather than deleting it once something newer exists.
+
 ## [2026-08-01] SIGKILL injection test trial count
 
 **Maps to:** architecture.md §3.1 ("≥500 trials, asserting recovery to a

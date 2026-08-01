@@ -28,6 +28,57 @@ under the user's own git identity (no Claude co-author trailer).
 **Status at end of session:** (updated as work proceeds — see task list
 below for what's in flight.)
 
+### /loop continuation: fixture 5, determinism, MODULE deltas, backward validation
+
+Worked through the remaining task list from the last status report. Done,
+each with real tests and (where relevant) real bugs found and fixed
+in-flight, not just designed and trusted:
+
+- **Fixture 5** (move a type across a package boundary) — failed on first
+  try, and the investigation found something significant: cross-package
+  interface satisfaction was **never detected at all**.
+  `collectPackageInterfacesFromPkg` only ever scanned the current
+  package's own files, so a type in package A implementing an interface in
+  package B (the NORMAL shape for io.Writer, http.Handler, etc.) silently
+  fell back to the no-implementers-found raw edge. Fixed with
+  `collectAllInterfaces`, built once across every loaded package. Shared
+  frontend fix — benefits v2 and v3.1 both, doesn't touch v2's
+  invalidation logic. Full writeup in docs/DECISIONS.md.
+- **Determinism (I11)** — no goroutine parallelism exists yet to test
+  literally, so tested what's actually buildable: ComputeFacts run 20x and
+  the full pipeline run 5x against identical input, comparing canonical
+  fact sets. Clean both times.
+- **MODULE deltas** — real go.mod parsing (`internal/modver`, using
+  `golang.org/x/mod/modfile`) and a real, tested `dependency_versions`
+  interval table. Deliberately did NOT wire this into fact invalidation —
+  `ComputeFacts` doesn't derive facts from dependency source at all, so
+  there's no fact anywhere whose correctness actually depends on a
+  dependency version yet. Wiring it anyway would have been fabricating a
+  signal, documented as a real next task in FLAGGED.md instead.
+- **Backward validation (§2.3)** — the "skip re-parsing" part isn't
+  possible without a `go/packages` frontend rewrite (real architectural
+  constraint, not a shortcut). What IS built: I13 (analyzer-version change
+  forces a full re-apply, using `go:embed`-based source hashing since
+  `debug.ReadBuildInfo()`'s vcs.revision was checked and confirmed NOT
+  populated in this environment — didn't build on an unverified
+  assumption), and a real cache-hit-rate diagnostic. Building the
+  diagnostic's test surfaced ANOTHER real bug: `LiveFileHashes` (derived
+  from `atlas.derivations`) is blind to any file producing zero facts
+  (e.g. an empty-bodied function), so such files looked "new" every
+  commit forever. Fixed with a dedicated `atlas.file_versions` table
+  tracking every file regardless of fact count.
+
+**Deliberately not attempted this round:** real incremental DRed
+(over-delete/rederive, replacing the full BFS recompute) and the actual
+§10.1 measurement run. Both need unhurried attention — DRed because a
+rushed rewrite risks a silent correctness regression in the one area the
+architecture doc calls "the hard center," and §10.1 because fairly
+measuring v2's retraction volume requires either instrumenting a copy of
+FROZEN v2 logic (risky — could diverge from what's actually tagged) or an
+honest external proxy, and the architecture doc is explicit that this
+measurement needs real methodology (sampling scheme, repeat count,
+hardware notes), not a single rushed run.
+
 ### Real-world smoke test against chi (not committed, just a check)
 
 Ran the actual pipeline (`IndexCommitFromRepo`, real git checkouts) against
